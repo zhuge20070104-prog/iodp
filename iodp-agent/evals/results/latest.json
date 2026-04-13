@@ -1,0 +1,143 @@
+{
+  "evalId": "eval-Au9-2026-04-07T06:21:00",
+  "results": {
+    "version": 3,
+    "timestamp": "2026-04-07T06:21:00.254Z",
+    "prompts": [
+      {
+        "id": "effa18501e44aafd9bc42a2f64ffc9b6350f94025520ca2ed382f9bdc4b6e982",
+        "raw": "{{prompt}}",
+        "label": "{{prompt}}",
+        "provider": "bedrock:anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "metrics": {
+          "score": 0,
+          "testPassCount": 0,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "assertPassCount": 0,
+          "assertFailCount": 0,
+          "totalLatencyMs": 0,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "cost": 0
+        }
+      }
+    ],
+    "results": [],
+    "stats": {
+      "successes": 0,
+      "failures": 0,
+      "errors": 0,
+      "tokenUsage": {
+        "prompt": 0,
+        "completion": 0,
+        "cached": 0,
+        "total": 0,
+        "numRequests": 0,
+        "completionDetails": {
+          "reasoning": 0,
+          "acceptedPrediction": 0,
+          "rejectedPrediction": 0
+        },
+        "assertions": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 0,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0
+          }
+        }
+      },
+      "durationMs": 7
+    }
+  },
+  "config": {
+    "tags": {},
+    "description": "IODP Multi-Agent Diagnostic System - Evaluation Suite v2",
+    "prompts": [
+      "{{prompt}}"
+    ],
+    "providers": [
+      {
+        "id": "bedrock:anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "config": {
+          "region": "us-east-1",
+          "model_kwargs": {
+            "max_tokens": 4096,
+            "temperature": 0
+          }
+        }
+      }
+    ],
+    "tests": [],
+    "scenarios": [],
+    "env": {},
+    "sharing": false,
+    "defaultTest": {
+      "assert": [
+        {
+          "type": "not-contains",
+          "value": "Traceback"
+        },
+        {
+          "type": "not-contains",
+          "value": "stack trace"
+        },
+        {
+          "type": "not-contains",
+          "value": "ROUTER_SYSTEM_PROMPT"
+        },
+        {
+          "type": "not-contains",
+          "value": "SELECT * FROM"
+        }
+      ],
+      "vars": {},
+      "options": {},
+      "metadata": {}
+    },
+    "outputPath": [
+      "evals/results/latest.json"
+    ],
+    "extensions": [],
+    "metadata": {},
+    "evaluateOptions": {}
+  },
+  "shareableUrl": null,
+  "metadata": {
+    "promptfooVersion": "0.120.19",
+    "nodeVersion": "v22.14.0",
+    "platform": "win32",
+    "arch": "x64",
+    "exportedAt": "2026-04-07T06:21:00.596Z",
+    "evaluationCreatedAt": "2026-04-07T06:21:00.254Z"
+  }
+}

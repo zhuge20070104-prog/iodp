@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UserClickstream",
+  "type": "object",
+  "required": ["event_id", "user_id", "session_id", "event_type", "event_timestamp", "page_url"],
+  "properties": {
+    "event_id":         { "type": "string", "format": "uuid" },
+    "user_id":          { "type": "string", "minLength": 1 },
+    "session_id":       { "type": "string" },
+    "event_type":       { "type": "string", "enum": ["click", "view", "scroll", "purchase", "add_to_cart", "checkout"] },
+    "event_timestamp":  { "type": "string", "format": "date-time" },
+    "page_url":         { "type": "string", "format": "uri" },
+    "referrer_url":     { "type": ["string", "null"] },
+    "device_info": {
+      "type": "object",
+      "properties": {
+        "device_type":  { "type": "string", "enum": ["mobile", "desktop", "tablet"] },
+        "os":           { "type": "string" },
+        "browser":      { "type": "string" },
+        "screen_resolution": { "type": "string" }
+      }
+    },
+    "geo_info": {
+      "type": "object",
+      "properties": {
+        "country_code": { "type": "string", "pattern": "^[A-Z]{2}$" },
+        "city":         { "type": ["string", "null"] },
+        "ip_hash":      { "type": "string" }
+      }
+    },
+    "properties": {
+      "type": "object",
+      "description": "业务自定义字段，如商品 ID、金额等"
+    }
+  }
+}

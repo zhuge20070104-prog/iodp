@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SystemAppLog",
+  "type": "object",
+  "required": ["log_id", "service_name", "log_level", "event_timestamp", "message"],
+  "properties": {
+    "log_id":           { "type": "string", "format": "uuid" },
+    "trace_id":         { "type": ["string", "null"] },
+    "span_id":          { "type": ["string", "null"] },
+    "service_name":     { "type": "string" },
+    "instance_id":      { "type": "string" },
+    "log_level":        { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR", "FATAL"] },
+    "event_timestamp":  { "type": "string", "format": "date-time" },
+    "message":          { "type": "string" },
+    "error_details": {
+      "type": ["object", "null"],
+      "properties": {
+        "error_code":   { "type": "string" },
+        "error_type":   { "type": "string" },
+        "stack_trace":  { "type": ["string", "null"] },
+        "http_status":  { "type": ["integer", "null"] }
+      }
+    },
+    "request_info": {
+      "type": ["object", "null"],
+      "properties": {
+        "method":       { "type": "string" },
+        "path":         { "type": "string" },
+        "user_id":      { "type": ["string", "null"] },
+        "duration_ms":  { "type": "number" }
+      }
+    },
+    "environment":      { "type": "string", "enum": ["prod", "staging", "dev"] }
+  }
+}

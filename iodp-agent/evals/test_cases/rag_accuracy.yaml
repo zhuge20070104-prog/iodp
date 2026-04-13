@@ -1,0 +1,59 @@
+# evals/test_cases/rag_accuracy.yaml
+# RAG 检索准确性测试
+# 目标：验证 RAG Agent 能召回与错误码相关的正确文档
+# 格式：纯 test 数组，由 promptfoo.yaml 中的 tests: 引用
+
+- description: "E2001 支付错误 → 应检索到支付相关解决方案"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：用户支付一直失败，错误码E2001，支付成功率从99%下降到75% 错误码：E2001"
+  assert:
+    - type: llm-rubric
+      value: "The retrieved documents should be relevant to payment processing failures and E2001 error code resolution"
+    - type: not-contains
+      value: "无相关文档"
+
+- description: "E3001 网关超时 → 检索到超时处理方案"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：页面加载超时，所有服务请求都在3秒后超时 错误码：E3001"
+  assert:
+    - type: llm-rubric
+      value: "Response should discuss gateway timeout configuration, circuit breaker patterns, or retry strategies"
+
+- description: "多错误码同时检索"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：支付和认证都在报错 错误码：E1001, E2001"
+  assert:
+    - type: llm-rubric
+      value: "Response should address both authentication (E1001) and payment (E2001) related issues"
+
+- description: "无错误码时仍能根据症状检索"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：用户的购物车里的商品突然消失了 错误码："
+  assert:
+    - type: llm-rubric
+      value: "Response should be relevant to cart or session issues even without explicit error codes"
+    - type: not-contains
+      value: "无相关文档"
+
+- description: "完全无关的错误码不应幻觉出答案"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：遇到了 ZZZZUNKNOWN9999 错误 错误码：ZZZZUNKNOWN9999"
+  assert:
+    - type: llm-rubric
+      value: "If no relevant documents are found, the system should acknowledge uncertainty rather than fabricating a solution. It should NOT confidently describe a non-existent error code's solution."
+
+- description: "历史工单解决方案应被召回"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：payment-service 错误率突然上涨到25%，昨晚11点开始的 错误码：E2001"
+  assert:
+    - type: llm-rubric
+      value: "Response should reference historical incident solutions or playbooks for payment-service high error rate scenarios"
+
+- description: "RAG 检索结果相关性 - 严格模式"
+  vars:
+    prompt: "根据以下错误信息检索相关技术文档：数据库连接耗尽导致支付失败 错误码：E2001"
+  assert:
+    - type: llm-rubric
+      value: "The response must discuss database connection pool issues or related infrastructure problems. It should NOT return general payment documentation that doesn't mention connection problems."
+    - type: javascript
+      value: "output.toLowerCase().includes('连接') || output.toLowerCase().includes('connection') || output.toLowerCase().includes('pool') || output.toLowerCase().includes('数据库')"

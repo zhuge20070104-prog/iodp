@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "ls",
+      "cd",
+      "cat",
+      "grep",
+      "rg",
+      "find",
+      "git status",
+      "tree",
+      "find",
+      "du"
+    ],
+    "defaultMode": "default"
+  }
+}
