@@ -153,6 +153,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "dest_prefix": dest_prefix,
         "message": (
             f"Replayed {replayed}/{len(files)} files to {dest_prefix}. "
-            f"Downstream Glue Job should be triggered manually to reprocess."
+            f"Next: run 'aws glue start-job-run --job-name "
+            f"iodp-replay-{table_name.replace('bronze_', '').replace('_', '-')}-to-bronze-{ENVIRONMENT} "
+            f"--arguments '{{\"--TABLE_NAME\":\"{table_name}\",\"--BATCH_DATE\":\"{batch_date}\"}}'' "
+            f"to write back to Bronze."
         ),
     }

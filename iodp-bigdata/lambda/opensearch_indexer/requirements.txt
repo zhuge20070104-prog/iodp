@@ -1,0 +1,4 @@
+opensearch-py>=2.4.0
+requests-aws4auth>=1.2.0
+pandas>=2.0.0
+pyarrow>=14.0.0

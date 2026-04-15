@@ -7,7 +7,7 @@
 #   - EventBridge 规则默认 DISABLED，运维人员在重处理前手动 enable
 #
 # 构建步骤（Lambda ZIP 需手动构建）:
-#   cd lambda/dlq_replay && pip install -r requirements.txt -t . && zip -r ../dlq_replay.zip .
+#   cd lambda/dlq_replay && zip -r ../dlq_replay.zip handler.py
 
 locals {
   function_name = "iodp-dlq-replay-${var.environment}"

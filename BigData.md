@@ -2498,6 +2498,76 @@ DQ 校验（所有规则并行打标记）
                   （触发 CloudWatch Alarm → SNS → Email）
 ```
 
+### 6.3 死信重灌运维 Runbook
+
+当数据工程师审查 dead letter 数据后，确认问题已修复（例如 DQ 规则已放宽、上游 Schema 问题已解决），可按以下步骤将死信数据重灌回 Bronze 层。
+
+#### 完整流程
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ Step 1: DLQ Replay Lambda — 将死信文件复制到 replay/ 目录            │
+│                                                                      │
+│ aws lambda invoke \                                                  │
+│   --function-name iodp-dlq-replay-{env} \                           │
+│   --payload '{                                                       │
+│     "table_name": "bronze_app_logs",                                │
+│     "batch_date": "2026-04-06",                                     │
+│     "dry_run": true                                                  │
+│   }' \                                                               │
+│   response.json                                                      │
+│                                                                      │
+│ 先 dry_run=true 确认文件数量和大小，再改为 dry_run=false 执行复制。  │
+│                                                                      │
+│ 结果：                                                               │
+│   dead_letter/table=bronze_app_logs/batch_id=*/date=2026-04-06/     │
+│     → replay/bronze_app_logs/2026-04-06/                            │
+└────────────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Step 2: Replay Glue Job — 从 replay/ 写回 Bronze Iceberg 表         │
+│                                                                      │
+│ # app_logs 重灌                                                      │
+│ aws glue start-job-run \                                             │
+│   --job-name iodp-replay-app-logs-to-bronze-{env} \                 │
+│   --arguments '{                                                     │
+│     "--TABLE_NAME": "bronze_app_logs",                              │
+│     "--BATCH_DATE": "2026-04-06"                                    │
+│   }'                                                                 │
+│                                                                      │
+│ # clickstream 重灌                                                   │
+│ aws glue start-job-run \                                             │
+│   --job-name iodp-replay-clickstream-to-bronze-{env} \              │
+│   --arguments '{                                                     │
+│     "--TABLE_NAME": "bronze_clickstream",                           │
+│     "--BATCH_DATE": "2026-04-06"                                    │
+│   }'                                                                 │
+│                                                                      │
+│ 操作：读取 replay/ parquet → 去除 _dq_error_type 列 → append Bronze │
+└────────────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Step 3: 等待下游自动消费                                              │
+│                                                                      │
+│ • app_logs → silver_parse_logs（每小时自动运行，MERGE 去重幂等）     │
+│ • clickstream → silver_enrich_clicks（每小时自动运行）               │
+│                                                                      │
+│ 无需手动触发 Silver/Gold Job，Iceberg 表更新后下游自动可见。         │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+#### 注意事项
+
+| 项目 | 说明 |
+|------|------|
+| **幂等性** | Silver 层使用 `iceberg_merge_dedup(merge_keys=["log_id"])` / `["event_id"]`，重复执行不会产生重复数据 |
+| **dead letter 保留期** | 30 天（S3 Lifecycle 自动删除），需在过期前完成重灌 |
+| **replay/ 目录清理** | 重灌完成后可手动删除 `s3://{bucket}/replay/{table}/{date}/`，非必须 |
+| **并发保护** | Glue Job 设置 `max_concurrent_runs = 1`，Lambda 设置 `reserved_concurrent_executions = 1` |
+| **监控** | 查看 Glue Job CloudWatch Logs 确认写入行数，或查 DynamoDB lineage_events 表 |
+
 ---
 
 ## 7. Medallion 三层架构规格
