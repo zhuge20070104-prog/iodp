@@ -15,6 +15,33 @@
 | **引擎中立性** | Spark、Flink、Trino、Presto 全支持 | Spark 优先，其他引擎支持滞后 |
 | **社区趋势** | AWS、Apple、Netflix 主推 | Databricks 主推，和 Databricks 平台绑定较深 |
 
+**面试追问：时间旅行是什么？Delta Lake 不也支持吗？**
+
+时间旅行是查历史某个时间点的数据快照：
+
+```sql
+-- 查当前数据
+SELECT * FROM app_logs WHERE service_name = 'payment-service';
+
+-- 查 3 天前的数据
+SELECT * FROM app_logs
+FOR SYSTEM_TIME AS OF TIMESTAMP '2026-04-13 00:00:00';
+```
+
+原理：Iceberg 每次写入生成一个快照（snapshot），不覆盖旧数据文件。查历史就是读旧快照引用的文件集合。
+
+Delta Lake 确实也支持时间旅行（`VERSION AS OF` / `TIMESTAMP AS OF`），这不是选 Iceberg 的理由。两者在时间旅行上的差异主要是实现细节：
+
+| | Iceberg | Delta Lake |
+|---|---|---|
+| 语法 | `FOR SYSTEM_TIME AS OF` | `VERSION AS OF` / `TIMESTAMP AS OF` |
+| 快照管理 | `previous-versions-max` 控制保留数 | `delta.logRetentionDuration` 控制保留时间 |
+| Athena 支持 | 原生支持时间旅行查询 | Athena 对 Delta 时间旅行支持有限 |
+
+本项目 DDL 里 `write.metadata.previous-versions-max = 10` 就是只保留 10 个历史快照，超过后旧快照和它引用的数据文件被清理，防止存储膨胀。
+
+实际用途：数据回溯（"写错了想看之前的样子"）、审计（"字段什么时候变的"）、误操作恢复（回退到上一个快照）。
+
 **面试追问：Iceberg 的隐藏文件过滤（Hidden Partition）怎么工作？**
 
 传统 Hive 分区要求查询 WHERE 里写分区列，否则全表扫描。Iceberg 的元数据层记录了每个数据文件的列级统计（min/max/null count），即使不按分区列查，Iceberg 也能跳过不相关的文件。
@@ -23,7 +50,55 @@
 
 **面试追问：为什么 Bronze 不按 service_name 分区？**
 
-v1 最初按 `service_name + log_level` 分区。问题是低流量服务（如 notification-service）每个 micro-batch 只有几条记录，产生大量小文件（small file problem），Athena 扫描元数据开销比扫描数据本身还大。v2 改为按 `event_date + log_level` 分区，service_name 降为普通列，靠 Iceberg metadata filtering 弥补。
+v1 最初按 `service_name + log_level` 分区。问题是低流量服务产生大量小文件。v2 改为按 `event_date + log_level` 分区，service_name 降为普通列，靠 Iceberg metadata filtering 弥补。
+
+**具体量化：小文件如何影响查询性能**
+
+以 notification-service（低流量，每 batch 5 条记录）为例：
+
+```
+方案 A：按 service_name 分区 → 1440 个小文件
+──────────────────────────────────────────
+
+Athena 执行过程：
+  1. S3 LIST：列出分区下所有文件 → 返回 1440 个文件路径
+  2. 读取每个文件的 Parquet footer（元数据）→ 1440 次 S3 GET
+  3. 所有文件都命中 → 读取数据 → 1440 次 S3 GET
+
+  S3 API 调用：~2881 次
+  数据总量：1440 × 2KB = 2.8MB（极小）
+  查询耗时：3-8 秒（瓶颈在网络往返次数，不是数据量）
+  S3 API 费用：$0.014
+
+
+方案 B：按 event_date 分区 + Iceberg compaction → 10 个大文件
+────────────────────────────────────────────────────────────
+
+所有 service 的数据混在同一个分区，compaction 合并后只有 10 个文件：
+  1. S3 LIST → 10 个文件
+  2. 读取 10 个 footer → Iceberg metadata filtering 发现只有 3 个文件
+     包含 notification-service 的数据 → 跳过其余 7 个
+  3. 读取 3 个文件，Parquet 列式存储只扫描 service_name 列做过滤
+
+  S3 API 调用：~14 次
+  查询耗时：1-2 秒
+  S3 API 费用：$0.000007
+
+
+对比：
+|                 | 1440 个小文件  | 10 个大文件       |
+|-----------------|--------------|-------------------|
+| S3 API 调用次数  | ~2881 次      | ~14 次            |
+| 网络往返次数     | ~2881 次      | ~14 次            |
+| 查询耗时        | 3-8 秒        | 1-2 秒            |
+| S3 API 费用     | $0.014        | $0.000007         |
+```
+
+核心问题不是数据大，是**文件多**。每个文件不管多小都要一次网络往返。1440 次网络往返 vs 14 次，差 100 倍。
+
+**面试追问：为什么不给 S3 建索引？**
+
+S3 是对象存储，不是数据库，没有索引能力。只能按前缀列出文件然后逐个读。Iceberg 的元数据层（manifest file）就是在 S3 之上人为加的一层"文件级索引" — 能告诉你"这个文件里有没有你要的数据"，但不能告诉你"这个文件第几行是你要的"。要行级索引只能用数据库（RDS、DynamoDB、Redshift），但那就不是数据湖了，成本和架构完全不同。
 
 ---
 
@@ -57,6 +132,33 @@ inquiry → 搜知识库 → 回复（永远这个顺序）
 | 业务规则 | `severity > 20% = P0` 写在代码里 | 写在 prompt 里，LLM 可能不遵守 |
 | max_clarification = 3 | `iteration_count >= 3` 代码强制 | "最多追问3次" 写在 prompt 里，可能被忽略 |
 
+**面试追问：Claude SDK 能不能写死流程？**
+
+不能从框架层面强制。但可以变通 — 每步只给 Claude 看一个 tool，它没得选：
+
+```python
+# 变通方式：每步只暴露一个 tool
+response1 = client.messages.create(tools=[classify_tool], ...)     # 只能分类
+response2 = client.messages.create(tools=[query_logs_tool], ...)   # 只能查日志
+response3 = client.messages.create(tools=[search_kb_tool], ...)    # 只能搜知识库
+```
+
+但这样写本质上就是你在手动编排流程 — 跟 LangGraph 做的事完全一样，只是没有 state 管理、没有 checkpointer、没有并行、没有 reducer，全部自己手搓。
+
+**面试追问：LangGraph 能不能调度 Claude SDK？**
+
+能，而且两者可以互补：LangGraph 管流程编排，Claude SDK 管单步推理。
+
+```
+LangGraph（流程控制层）
+  ├── router_node       → Claude SDK（分类意图）
+  ├── log_analyzer_node → Claude SDK + tool_use（生成 SQL，可让 Claude 自主决定是否多次查询）
+  ├── rag_node          → Claude SDK（生成检索 query）
+  └── reply + report    → Claude SDK（并行生成）
+```
+
+当前项目用的 `ChatBedrock` 就是 LangChain 对 Bedrock Claude API 的封装，本质上已经是 LangGraph 调度 Claude。换成 `anthropic.Anthropic()` 直接调用也完全可以，只是换了调用方式，结果一样。每个 node 里 Claude 只做一件事（生成 SQL / 生成回复），不需要 tool_use 的自主决策能力。
+
 **面试追问：什么场景会选 Claude SDK？**
 
 流程开放、解法不确定的场景。比如编程助手："帮我重构这个函数" — Claude 需要自己决定先读哪些文件、先跑哪些测试。每次任务不同，流程不固定，LLM 自主决策是核心价值。
@@ -73,6 +175,45 @@ inquiry → 搜知识库 → 回复（永远这个顺序）
 | **缺少的功能** | 无 API Key 管理、无 Usage Plan、无请求/响应转换 | 全都有 |
 
 本项目不需要 API Key 管理和 Usage Plan（不是开放 API），HTTP API 满足所有需求且**便宜 70%**。
+
+**面试追问：AWS 的 HTTP API 和 REST API 命名是不是和业界概念冲突？**
+
+是的。业界概念里 REST API 是 HTTP API 的一种设计风格（资源用 URL、操作用 HTTP 方法、无状态）。但 AWS 把这两个词当成了两个产品的名字：
+
+```
+业界：HTTP API ⊃ REST API（REST 是 HTTP 的子集/风格）
+AWS： HTTP API 和 REST API 是两个独立产品（2019 vs 2015）
+```
+
+两个 AWS 产品都能做 RESTful API，也都能做非 RESTful API。本项目的 API 设计是 RESTful 的（POST 创建 job，GET 查询 job），只是部署在 AWS HTTP API 产品上。
+
+**面试追问：REST 的"无状态"是什么意思？**
+
+每个请求自包含所有认证信息，服务端不存 session：
+
+```
+有状态（session 模式）：
+  POST /login → 服务端存 session { id: "abc", user: "张三" }
+  GET /diagnose → 只带 Cookie: session_id=abc
+  → 服务端查 session 表 → 如果请求打到另一台实例，session 不在那 → 403
+
+无状态（JWT 模式）：
+  POST /login → 服务端生成 JWT token（内含 user=张三, role=admin, 过期时间）
+  GET /diagnose → 带 Authorization: Bearer eyJhbG...
+  → 任何实例都能解码验证 → 不需要查 session 表
+```
+
+本项目用 Cognito JWT。每次 login 生成的 token 字符串不同（过期时间不同），但解码出来的身份相同。API Gateway 在 Lambda 之前就验完 JWT，无效 token 根本到不了代码：
+
+```hcl
+# Terraform — API Gateway JWT Authorizer
+jwt_configuration {
+  audience = ["iodp-agent-client"]          # token 的 aud 字段必须匹配
+  issuer   = "https://cognito-idp.../..."   # token 必须由这个 Cognito 签发
+}
+```
+
+无状态的好处：Lambda 天然多实例并发，请求打到任何实例都能处理，不需要共享 session 存储。多轮对话的"状态"存在 DynamoDB（checkpointer），不是服务端内存。
 
 **面试追问：HTTP API 的 29 秒超时怎么解决的？**
 
