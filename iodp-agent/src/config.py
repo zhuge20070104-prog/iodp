@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # DynamoDB
     agent_state_table: str = "iodp-agent-state-prod"
     agent_jobs_table: str = "iodp-agent-jobs-prod"     # 异步 Job 跟踪表（新增）
+    bug_tickets_table: str = "iodp-bug-tickets-prod"  # Bug 报告工单归档表
     dq_reports_table: str = "iodp-dq-reports-prod"
 
     # OpenSearch

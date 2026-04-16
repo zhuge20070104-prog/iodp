@@ -54,14 +54,19 @@ def rag_agent_node(state: AgentState) -> dict:
     ])
     rag_query = rag_query_response.content.strip()
 
-    raw_hits = vector_search(
-        query_text=rag_query,
-        index_names=["product_docs", "incident_solutions"],
-        top_k=5,
-        opensearch_endpoint=settings.opensearch_endpoint,
-        region=settings.aws_region,
-        filter_error_codes=error_codes if error_codes else None,
-    )
+    try:
+        raw_hits = vector_search(
+            query_text=rag_query,
+            index_names=["product_docs", "incident_solutions"],
+            top_k=5,
+            opensearch_endpoint=settings.opensearch_endpoint,
+            region=settings.aws_region,
+            filter_error_codes=error_codes if error_codes else None,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("OpenSearch vector search failed: %s", e)
+        raw_hits = []
 
     retrieved_docs: list[RAGDocument] = [
         RAGDocument(

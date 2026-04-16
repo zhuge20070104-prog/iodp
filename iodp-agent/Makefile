@@ -146,6 +146,29 @@ index-kb: check-aws
 	@echo "✅ 知识库索引完成"
 
 # ──────────────────────────────────────────────────────────────
+# 构建前端（React → dist/）
+# ──────────────────────────────────────────────────────────────
+build-frontend:
+	@echo "🎨 构建前端..."
+	$(eval API_URL := $(shell cd $(TF_DIR) && terraform output -raw api_endpoint 2>/dev/null))
+	cd frontend && npm install && npm run build
+	@echo "✅ 前端构建完成: frontend/dist/"
+
+# ──────────────────────────────────────────────────────────────
+# 部署前端到 S3 + CloudFront
+# ──────────────────────────────────────────────────────────────
+deploy-frontend: check-aws build-frontend
+	@echo "📤 上传前端到 S3..."
+	$(eval FRONTEND_BUCKET := $(shell cd $(TF_DIR) && terraform output -raw frontend_bucket 2>/dev/null))
+	$(eval CF_DIST_ID := $(shell cd $(TF_DIR) && terraform output -raw cloudfront_distribution_id 2>/dev/null))
+	aws s3 sync frontend/dist/ s3://$(FRONTEND_BUCKET)/ --delete --region $(AWS_REGION)
+	@echo "🔄 刷新 CloudFront 缓存..."
+	aws cloudfront create-invalidation --distribution-id $(CF_DIST_ID) --paths "/*" > /dev/null
+	@echo "✅ 前端已部署"
+	$(eval FRONTEND_URL := $(shell cd $(TF_DIR) && terraform output -raw frontend_url 2>/dev/null))
+	@echo "🌐 访问地址: $(FRONTEND_URL)"
+
+# ──────────────────────────────────────────────────────────────
 # 日常部署（更新代码）
 # ──────────────────────────────────────────────────────────────
 deploy: check-aws build-image push-image
@@ -159,6 +182,13 @@ deploy: check-aws build-image push-image
 	@echo ""
 	@echo "🎉 部署完成！"
 	@cd $(TF_DIR) && terraform output
+
+# ──────────────────────────────────────────────────────────────
+# 全量部署（后端 + 前端）
+# ──────────────────────────────────────────────────────────────
+deploy-all: deploy deploy-frontend
+	@echo ""
+	@echo "🎉 后端 + 前端全部部署完成！"
 
 # ──────────────────────────────────────────────────────────────
 # 端到端测试（发一个 Demo 请求）

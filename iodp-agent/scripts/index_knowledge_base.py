@@ -55,11 +55,53 @@ def index_incidents(opensearch_client, bedrock_client, athena_df):
 
 
 if __name__ == "__main__":
-    # 读取项目一 Gold 层的最新 incident_summary 数据
+    import argparse
+
+    parser = argparse.ArgumentParser(description="全量索引 incident_summary 到 OpenSearch")
+    parser.add_argument("--region", default="ap-southeast-1")
+    parser.add_argument("--env", default="dev")
+    parser.add_argument("--opensearch-endpoint", required=True)
+    args = parser.parse_args()
+
+    gold_db = f"iodp_gold_{args.env}"
+
+    # ─── 1. 从 Gold 层读取全量 incident_summary ───
+    print(f"Reading from Athena: {gold_db}.{GOLD_TABLE}")
     df = wr.athena.read_sql_table(
         table=GOLD_TABLE,
-        database=GOLD_DB,
+        database=gold_db,
         ctas_approach=False,
+        boto3_session=boto3.Session(region_name=args.region),
     )
     print(f"Loaded {len(df)} incidents from Gold layer")
-    # ... 初始化客户端，调用索引函数
+
+    if df.empty:
+        print("No incidents to index. Exiting.")
+        exit(0)
+
+    # ─── 2. 初始化 OpenSearch 客户端 ───
+    session = boto3.Session(region_name=args.region)
+    creds = session.get_credentials().get_frozen_credentials()
+    awsauth = AWS4Auth(
+        creds.access_key,
+        creds.secret_key,
+        args.region,
+        "aoss",
+        session_token=creds.token,
+    )
+    host = args.opensearch_endpoint.replace("https://", "")
+    os_client = OpenSearch(
+        hosts=[{"host": host, "port": 443}],
+        http_auth=awsauth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+        timeout=30,
+    )
+
+    # ─── 3. 初始化 Bedrock 客户端 ───
+    bedrock_client = boto3.client("bedrock-runtime", region_name=args.region)
+
+    # ─── 4. 全量索引 ───
+    index_incidents(os_client, bedrock_client, df)
+    print(f"Done. Indexed {len(df)} incidents to {OS_INDEX}")

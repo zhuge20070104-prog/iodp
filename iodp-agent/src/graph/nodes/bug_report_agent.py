@@ -8,10 +8,12 @@ Bug Report Agent 节点（从原 Synthesizer 拆分）
 """
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 
+import boto3
 from langchain_aws import ChatBedrock
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -20,6 +22,8 @@ from ..state import (
     get_error_logs, get_retrieved_docs, get_user_id, get_incident_time_hint,
 )
 from src.config import settings
+
+logger = logging.getLogger(__name__)
 
 BUG_REPORT_SYSTEM_PROMPT = """
 你是一个企业级 SRE 智能助手，专门负责生成技术 Bug 报告。
@@ -31,12 +35,41 @@ BUG_REPORT_SYSTEM_PROMPT = """
 - confidence_score 在 0.0~1.0 之间，根据证据充分性评估
 - 证据不足时：root_cause 写 "证据不足，需进一步排查"，confidence_score <= 0.3
 - reproduction_steps 列举复现步骤（如无法确定，写 "需进一步复现"）
+- recommended_fix 基于知识库文档和日志证据给出修复建议；无把握时写 "建议联系 SRE 团队排查"
 
 【安全规则】
 - 不要在 root_cause 中包含用户个人信息（姓名、手机号、身份证等）
 
 输出格式：纯 JSON，不要任何前缀或解释。
 """.strip()
+
+
+_BUG_TICKETS_TTL_DAYS = 180
+
+
+def _save_to_tickets_table(report: BugReport) -> None:
+    """将 Bug 报告持久化到 iodp-bug-tickets 表，供运维 Dashboard 和工单系统消费"""
+    try:
+        dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+        table = dynamodb.Table(settings.bug_tickets_table)
+        ttl = int(datetime.now(timezone.utc).timestamp()) + _BUG_TICKETS_TTL_DAYS * 86400
+
+        item = dict(report)
+        # DynamoDB 不支持嵌套 dict 直接存，序列化复杂字段
+        item["incident_time_range"] = json.dumps(item.get("incident_time_range", {}))
+        item["error_codes"] = item.get("error_codes", [])
+        item["evidence_trace_ids"] = item.get("evidence_trace_ids", [])
+        item["reproduction_steps"] = item.get("reproduction_steps", [])
+        item["kb_references"] = item.get("kb_references", [])
+        # float → Decimal 兼容
+        item["error_rate_at_incident"] = str(item.get("error_rate_at_incident", 0))
+        item["confidence_score"] = str(item.get("confidence_score", 0))
+        item["TTL"] = ttl
+
+        table.put_item(Item=item)
+        logger.info("Bug report %s saved to tickets table", report["report_id"])
+    except Exception as e:
+        logger.error("Failed to save bug report to tickets table: %s", e)
 
 
 def _validate_bug_report_schema(data: dict) -> BugReport:
@@ -118,10 +151,12 @@ def bug_report_agent_node(state: AgentState) -> dict:
             # 注入系统字段（防止 LLM 捏造）
             bug_report_dict["report_id"]              = str(uuid.uuid4())
             bug_report_dict["generated_at"]           = datetime.now(timezone.utc).isoformat()
+            bug_report_dict["affected_service"]       = top_services[0] if top_services else "unknown"
             bug_report_dict["affected_user_id"]       = user_id
             bug_report_dict["error_codes"]            = top_error_codes
             bug_report_dict["evidence_trace_ids"]     = trace_samples
             bug_report_dict["error_rate_at_incident"] = top_error_rate
+            bug_report_dict["incident_time_range"]    = {"start": time_hint, "end": time_hint}
             bug_report_dict["kb_references"]          = [d["doc_id"] for d in retrieved_docs[:3]]
             validated_bug_report = _validate_bug_report_schema(bug_report_dict)
         else:
@@ -146,6 +181,10 @@ def bug_report_agent_node(state: AgentState) -> dict:
         )
 
     report_id = validated_bug_report["report_id"] if validated_bug_report else "N/A"
+
+    # 持久化到 tickets 表（180 天 TTL），失败不中断流程
+    if validated_bug_report:
+        _save_to_tickets_table(validated_bug_report)
 
     return {
         # merge_synthesizer reducer 会将此与 ReplyAgent 的输出合并

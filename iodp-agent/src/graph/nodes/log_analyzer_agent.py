@@ -95,13 +95,18 @@ def log_analyzer_agent_node(state: AgentState) -> dict:
     generated_sql = sql_response.content.strip()
 
     # ─── 执行 Athena 查询 ───
-    query_result = execute_athena_query(
-        sql=generated_sql,
-        database=f"iodp_gold_{env}",
-        output_bucket=settings.athena_result_bucket,
-        workgroup=settings.athena_workgroup,
-        max_rows=settings.athena_max_rows,       # v2: 结果截断
-    )
+    try:
+        query_result = execute_athena_query(
+            sql=generated_sql,
+            database=f"iodp_gold_{env}",
+            output_bucket=settings.athena_result_bucket,
+            workgroup=settings.athena_workgroup,
+            max_rows=settings.athena_max_rows,       # v2: 结果截断
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("Athena query failed: %s | SQL: %s", e, generated_sql)
+        query_result = {"rows": [], "rows_truncated": False, "error": str(e)}
 
     rows           = query_result.get("rows", [])
     rows_truncated = query_result.get("rows_truncated", False)
