@@ -1,7 +1,7 @@
 -- athena/ddl/bronze_clickstream.sql
 -- Bronze 层 clickstream Iceberg 表（Glue Streaming Job 写入前需先建表）
 
-CREATE TABLE IF NOT EXISTS iodp_bronze_prod.clickstream (
+CREATE TABLE IF NOT EXISTS iodp_bronze_${ENVIRONMENT}.clickstream (
     event_id             STRING        COMMENT 'Kafka 消息唯一 ID',
     user_id              STRING        COMMENT '用户 ID',
     session_id           STRING        COMMENT '会话 ID',
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS iodp_bronze_prod.clickstream (
     processing_timestamp TIMESTAMP     COMMENT 'Glue Job 处理时间'
 )
 PARTITIONED BY (event_type)
-LOCATION 's3://iodp-bronze-prod/clickstream/'
+LOCATION 's3://iodp-bronze-${ENVIRONMENT}-${ACCOUNT_ID}/clickstream/'
 TBLPROPERTIES (
     'table_type'                        = 'ICEBERG',
     'format'                            = 'parquet',

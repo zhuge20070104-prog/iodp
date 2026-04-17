@@ -2,7 +2,7 @@
 -- Gold 层故障事件摘要（gold_incident_summary.py 按 stat_date 分区覆盖写入）
 -- 下游：S3 Event → opensearch_indexer Lambda → Bedrock Embedding → OpenSearch RAG 知识库
 
-CREATE TABLE IF NOT EXISTS iodp_gold_prod.incident_summary (
+CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.incident_summary (
     incident_id          STRING       COMMENT '故障 ID，格式: INC-{date}-{service}-{error_code}',
     title                STRING       COMMENT '故障标题',
     service_name         STRING       COMMENT '故障服务名称',
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS iodp_gold_prod.incident_summary (
     stat_date            STRING       COMMENT '分区键 = 故障发生日期'
 )
 PARTITIONED BY (stat_date)
-LOCATION 's3://iodp-gold-prod/incident_summary/'
+LOCATION 's3://iodp-gold-${ENVIRONMENT}-${ACCOUNT_ID}/incident_summary/'
 TBLPROPERTIES (
     'table_type'                        = 'ICEBERG',
     'format'                            = 'parquet',

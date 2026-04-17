@@ -179,7 +179,7 @@ def process_batch(batch_df: DataFrame, batch_id: int):
 
     write_lineage_event(
         source_table="msk::system_app_logs",
-        target_table=f"s3://bronze/app_logs/",
+        target_table=BRONZE_PATH,
         transformation="JSON_PARSE + FLATTEN + DQ_CHECK",
         job_name=args["JOB_NAME"],
         job_run_id=JOB_RUN_ID,
@@ -209,7 +209,7 @@ query = kafka_df \
     .writeStream \
     .foreachBatch(process_batch) \
     .option("checkpointLocation",
-            f"s3://{args['BRONZE_BUCKET']}checkpoints/app_logs/") \
+            f"{args['BRONZE_BUCKET']}checkpoints/app_logs/") \
     .trigger(processingTime="60 seconds") \
     .start()
 

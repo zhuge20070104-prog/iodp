@@ -1,7 +1,7 @@
 -- athena/ddl/silver_parsed_logs.sql
 -- Silver 层去重后的应用日志（silver_parse_logs.py 通过 MERGE INTO 写入，log_id 保证唯一）
 
-CREATE TABLE IF NOT EXISTS iodp_silver_prod.parsed_logs (
+CREATE TABLE IF NOT EXISTS iodp_silver_${ENVIRONMENT}.parsed_logs (
     log_id               STRING        COMMENT '去重后唯一日志 ID',
     trace_id             STRING        COMMENT '分布式追踪 trace ID',
     span_id              STRING        COMMENT '分布式追踪 span ID',
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS iodp_silver_prod.parsed_logs (
     processing_timestamp TIMESTAMP
 )
 PARTITIONED BY (event_date)
-LOCATION 's3://iodp-silver-prod/parsed_logs/'
+LOCATION 's3://iodp-silver-${ENVIRONMENT}-${ACCOUNT_ID}/parsed_logs/'
 TBLPROPERTIES (
     'table_type'                        = 'ICEBERG',
     'format'                            = 'parquet',

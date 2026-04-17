@@ -336,3 +336,119 @@ echo "初始化 Terraform..."
 2. **优先查 Gold 表**：Dashboard 和定期报表只用 Gold 表，不用视图。
 3. **视图查询必须带分区键**：`v_user_session` 带 `event_date`，`v_error_log_enriched` 带 `stat_hour` 范围。
 4. **避免 SELECT ***：只取需要的列，Parquet 列式存储按列计费，少选列 = 少花钱。
+
+---
+
+## Storage 模块详解
+
+`terraform/main.tf` 中的 `module "storage"` 调用 `./modules/storage` 子模块，负责创建项目的所有 S3 存储桶，是整个数据湖的存储基座。
+
+```hcl
+module "storage" {
+  source = "./modules/storage"
+
+  environment         = var.environment
+  bronze_bucket_name  = "iodp-bronze-${var.environment}-${var.aws_account_id}"
+  silver_bucket_name  = "iodp-silver-${var.environment}-${var.aws_account_id}"
+  gold_bucket_name    = "iodp-gold-${var.environment}-${var.aws_account_id}"
+  scripts_bucket_name = "iodp-glue-scripts-${var.environment}-${var.aws_account_id}"
+  dead_letter_prefix  = "dead_letter/"
+  ia_transition_days      = 30
+  glacier_transition_days = 90
+  expiration_days         = 365
+  tags                    = local.mandatory_tags
+}
+```
+
+### S3 桶命名（数据湖三层架构）
+
+| 参数 | 用途 | 命名示例 |
+|------|------|---------|
+| `bronze_bucket_name` | **Bronze 层**（原始数据）：从 MSK 消费的 raw JSON 直接落到这里 | `iodp-bronze-dev-123456789012` |
+| `silver_bucket_name` | **Silver 层**（清洗数据）：经过 DQ 校验、解析、enrichment 后的数据 | `iodp-silver-dev-123456789012` |
+| `gold_bucket_name` | **Gold 层**（聚合数据）：面向业务的汇总表（如 `gold_api_error_stats`、`gold_hourly_active_users`） | `iodp-gold-dev-123456789012` |
+| `scripts_bucket_name` | **Glue 脚本桶**：存放所有 Glue Job 的 Python 脚本和 `lib.zip`，Glue 运行时从这里拉取代码 | `iodp-glue-scripts-dev-123456789012` |
+
+桶名拼接了 `${var.environment}` 和 `${var.aws_account_id}` 保证全局唯一（S3 桶名是全球命名空间）。
+
+### DLQ 前缀
+
+`dead_letter_prefix = "dead_letter/"` — DQ 校验不通过的"死信"记录写入 Bronze 桶下的 `dead_letter/` 路径，方便后续用 `dlq_replay` 模块重放。
+
+### FinOps 生命周期策略（控制存储成本）
+
+这三个参数对应 S3 Lifecycle Rule，实现 **热 → 温 → 冷 → 删除** 的数据生命周期管理：
+
+| 参数 | 含义 |
+|------|------|
+| `ia_transition_days = 30` | 数据写入 **30 天后**自动迁移到 S3 Infrequent Access（IA），存储费降低约 45% |
+| `glacier_transition_days = 90` | **90 天后**迁移到 S3 Glacier，存储费再降约 80% |
+| `expiration_days = 365` | **365 天后**自动删除，避免无限增长 |
+
+### 下游依赖
+
+`compute`、`dlq_replay`、`replay_jobs`、`opensearch_indexer` 模块都依赖 storage 模块输出的 bucket name 和 ARN。
+
+---
+
+## Glue Streaming Job 参数传递链路
+
+以 `stream_app_logs.py` 为例，Python 代码中通过 `getResolvedOptions` 获取的参数：
+
+```python
+args = getResolvedOptions(sys.argv, [
+    "JOB_NAME",
+    "MSK_BOOTSTRAP_SERVERS",
+    "BRONZE_BUCKET",
+    "DQ_TABLE",
+    "LINEAGE_TABLE",
+    "ENVIRONMENT",
+])
+```
+
+这些参数在 `terraform/modules/compute/main.tf` 的 `aws_glue_job.stream_app_logs` 资源中通过 `default_arguments` 传入：
+
+```hcl
+default_arguments = {
+  "--MSK_BOOTSTRAP_SERVERS" = var.msk_bootstrap_brokers
+  "--BRONZE_BUCKET"         = "s3://${var.bronze_bucket_name}/"
+  "--DQ_TABLE"              = var.dq_reports_table_name
+  "--LINEAGE_TABLE"         = var.lineage_table_name
+  "--ENVIRONMENT"           = var.environment
+}
+```
+
+### 完整传递链路
+
+```
+terraform/environments/dev.tfvars  或  prod.tfvars
+    │
+    ▼
+terraform/main.tf  (根模块)
+    │
+    ├── module "storage"    → bronze_bucket_name
+    ├── module "streaming"  → bootstrap_brokers_sasl_iam
+    └── module "dynamodb"   → dq_reports_table_name, lineage_events_table_name
+            │
+            ▼  (通过 module output 传递)
+    module "compute"
+        │
+        ▼
+    aws_glue_job.stream_app_logs  →  default_arguments
+        │
+        ▼  (Glue 运行时注入 --key=value)
+    Python getResolvedOptions()  →  args["KEY"]
+```
+
+### 各参数值来源
+
+| Python 参数 | Terraform `default_arguments` key | 值来源 |
+|---|---|---|
+| `JOB_NAME` | Glue 自动注入（无需显式声明） | 资源 `name = "iodp-stream-app-logs-${var.environment}"` |
+| `MSK_BOOTSTRAP_SERVERS` | `--MSK_BOOTSTRAP_SERVERS` | `module.streaming.bootstrap_brokers_sasl_iam` → MSK Serverless 集群 |
+| `BRONZE_BUCKET` | `--BRONZE_BUCKET` | `module.storage.bronze_bucket_name` → S3 bucket |
+| `DQ_TABLE` | `--DQ_TABLE` | `module.dynamodb.dq_reports_table_name` → DynamoDB 表 |
+| `LINEAGE_TABLE` | `--LINEAGE_TABLE` | `module.dynamodb.lineage_events_table_name` → DynamoDB 表 |
+| `ENVIRONMENT` | `--ENVIRONMENT` | 根模块 `var.environment`（在 `environments/dev.tfvars` / `prod.tfvars` 中设置） |
+
+`JOB_NAME` 比较特殊：Glue 服务会自动将资源的 `name` 作为 `--JOB_NAME` 注入，不需要在 `default_arguments` 中显式声明。

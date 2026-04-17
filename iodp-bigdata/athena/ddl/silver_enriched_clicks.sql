@@ -1,7 +1,7 @@
 -- athena/ddl/silver_enriched_clicks.sql
 -- Silver 层去重后的点击流（结构与 Bronze 一致，但 event_id 保证唯一）
 
-CREATE TABLE IF NOT EXISTS iodp_silver_prod.enriched_clicks (
+CREATE TABLE IF NOT EXISTS iodp_silver_${ENVIRONMENT}.enriched_clicks (
     event_id             STRING        COMMENT '去重后唯一事件 ID',
     user_id              STRING        COMMENT '用户 ID（非空）',
     session_id           STRING,
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS iodp_silver_prod.enriched_clicks (
     processing_timestamp TIMESTAMP
 )
 PARTITIONED BY (event_date, event_type)
-LOCATION 's3://iodp-silver-prod/enriched_clicks/'
+LOCATION 's3://iodp-silver-${ENVIRONMENT}-${ACCOUNT_ID}/enriched_clicks/'
 TBLPROPERTIES (
     'table_type'                        = 'ICEBERG',
     'format'                            = 'parquet',

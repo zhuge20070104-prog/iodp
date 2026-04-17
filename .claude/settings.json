@@ -1,5 +1,21 @@
 {
-  "defaultMode": "auto",
   "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Edit",
+      "Write",
+      "Read",
+      "Glob",
+      "Grep",
+      "Agent",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "mcp__MaaS-GoogleDrive__*",
+      "mcp__MaaS-GitLab__*",
+      "mcp__MaaSConfluence__*",
+      "mcp__MaaS-Jira__*",
+      "mcp__MaaS-NVBugs__*"
+    ]
   }
 }

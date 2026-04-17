@@ -147,7 +147,7 @@ query = kafka_df \
     .writeStream \
     .foreachBatch(process_batch) \
     .option("checkpointLocation",
-            f"s3://{args['BRONZE_BUCKET']}checkpoints/clickstream/") \
+            f"{args['BRONZE_BUCKET']}checkpoints/clickstream/") \
     .trigger(processingTime="60 seconds") \
     .start()
 

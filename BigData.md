@@ -183,7 +183,7 @@ iodp-bigdata/
 │   │   │   ├── variables.tf
 │   │   │   └── outputs.tf
 │   │   │
-│   │   ├── compute/                   # Glue Jobs、Glue Catalog、IAM Roles
+│   │   ├── compute/                   # Glue Jobs（7个）、Glue Catalog、IAM Roles
 │   │   │   ├── main.tf
 │   │   │   ├── variables.tf
 │   │   │   └── outputs.tf
@@ -193,7 +193,22 @@ iodp-bigdata/
 │   │   │   ├── variables.tf
 │   │   │   └── outputs.tf
 │   │   │
-│   │   └── dynamodb/                  # DQ 报告表、血缘事件表
+│   │   ├── dynamodb/                  # DQ 报告表、血缘事件表、阈值配置表
+│   │   │   ├── main.tf
+│   │   │   ├── variables.tf
+│   │   │   └── outputs.tf
+│   │   │
+│   │   ├── dlq_replay/               # DLQ 死信数据重处理 Lambda
+│   │   │   ├── main.tf
+│   │   │   ├── variables.tf
+│   │   │   └── outputs.tf
+│   │   │
+│   │   ├── opensearch_indexer/        # S3 事件驱动 OpenSearch 索引 Lambda
+│   │   │   ├── main.tf
+│   │   │   ├── variables.tf
+│   │   │   └── outputs.tf
+│   │   │
+│   │   └── replay_jobs/              # DLQ 死信重灌 Bronze 的 Glue Batch Jobs
 │   │       ├── main.tf
 │   │       ├── variables.tf
 │   │       └── outputs.tf
@@ -212,13 +227,22 @@ iodp-bigdata/
 │   │   ├── silver_parse_logs.py       # Bronze → Silver：日志解析 + 嵌套 JSON 展开
 │   │   ├── gold_hourly_active_users.py # Silver → Gold：每小时活跃用户
 │   │   ├── gold_api_error_stats.py     # Silver → Gold：API 错误率聚合
-│   │   └── gold_incident_summary.py    # Gold：生成故障工单摘要（供 Agent RAG）
+│   │   ├── gold_incident_summary.py    # Gold：生成故障工单摘要（供 Agent RAG）
+│   │   ├── replay_clickstream_to_bronze.py  # DLQ 重灌：点击流死信 → Bronze
+│   │   └── replay_app_logs_to_bronze.py     # DLQ 重灌：日志死信 → Bronze
 │   │
 │   └── lib/
 │       ├── data_quality.py            # 公共 DQ 校验框架（可复用）
 │       ├── lineage.py                 # 血缘事件写入工具函数
 │       ├── iceberg_utils.py           # Iceberg 读写工具
 │       └── schema_definitions.py     # 所有 Schema 的集中定义
+│
+├── lambda/
+│   ├── dlq_replay/
+│   │   └── handler.py                # DLQ 重处理 Lambda（读 dead_letter/ 写 replay/）
+│   └── opensearch_indexer/
+│       ├── handler.py                # S3 事件 → OpenSearch 向量索引 Lambda
+│       └── requirements.txt          # opensearch-py、boto3 等依赖
 │
 ├── schemas/
 │   ├── user_clickstream.json          # Kafka Topic Schema（JSON Schema）
@@ -230,26 +254,22 @@ iodp-bigdata/
 │   │   └── v_user_session.sql         # 用户会话聚合视图
 │   └── ddl/
 │       ├── bronze_clickstream.sql
+│       ├── bronze_app_logs.sql
 │       ├── silver_enriched_clicks.sql
-│       └── gold_api_error_stats.sql
+│       ├── silver_parsed_logs.sql
+│       ├── gold_api_error_stats.sql
+│       ├── gold_hourly_active_users.sql
+│       └── gold_incident_summary.sql
 │
 ├── tests/
-│   ├── unit/
-│   │   ├── test_data_quality.py
-│   │   └── test_silver_enrich_clicks.py
-│   └── integration/
-│       └── test_glue_job_e2e.py
+│   └── unit/
+│       ├── conftest.py
+│       └── test_data_quality.py
 │
 ├── scripts/
 │   ├── bootstrap_kafka_topics.sh      # 创建 MSK Topic 的初始化脚本
 │   └── upload_glue_scripts.sh         # 将 Glue 脚本上传到 S3
 │
-├── .github/
-│   └── workflows/
-│       ├── terraform-plan.yml
-│       └── glue-test.yml
-│
-├── requirements.txt                   # PySpark 测试依赖
 └── README.md
 ```
 

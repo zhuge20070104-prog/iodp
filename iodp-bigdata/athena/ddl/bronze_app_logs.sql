@@ -1,7 +1,7 @@
 -- athena/ddl/bronze_app_logs.sql
 -- Bronze 层 app_logs Iceberg 表（Glue Streaming Job stream_app_logs.py 写入前需先建表）
 
-CREATE TABLE IF NOT EXISTS iodp_bronze_prod.app_logs (
+CREATE TABLE IF NOT EXISTS iodp_bronze_${ENVIRONMENT}.app_logs (
     log_id               STRING        COMMENT '日志唯一 ID（UUID）',
     trace_id             STRING        COMMENT '分布式追踪 trace ID',
     span_id              STRING        COMMENT '分布式追踪 span ID',
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS iodp_bronze_prod.app_logs (
     event_date           STRING        COMMENT '分区键 = date_format(event_timestamp, yyyy-MM-dd)'
 )
 PARTITIONED BY (event_date, log_level)
-LOCATION 's3://iodp-bronze-prod/app_logs/'
+LOCATION 's3://iodp-bronze-${ENVIRONMENT}-${ACCOUNT_ID}/app_logs/'
 TBLPROPERTIES (
     'table_type'                        = 'ICEBERG',
     'format'                            = 'parquet',

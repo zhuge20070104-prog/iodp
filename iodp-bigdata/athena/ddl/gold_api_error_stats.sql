@@ -1,7 +1,7 @@
 -- athena/ddl/gold_api_error_stats.sql
 -- Gold 层 API 错误率聚合表
 
-CREATE TABLE IF NOT EXISTS iodp_gold_prod.api_error_stats (
+CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.api_error_stats (
     stat_hour         TIMESTAMP    COMMENT '统计小时（整点，UTC）',
     service_name      STRING       COMMENT '服务名称',
     error_code        STRING       COMMENT '错误码',
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS iodp_gold_prod.api_error_stats (
     stat_date         DATE         COMMENT '分区键'
 )
 PARTITIONED BY (stat_date, service_name)
-LOCATION 's3://iodp-gold-prod/api_error_stats/'
+LOCATION 's3://iodp-gold-${ENVIRONMENT}-${ACCOUNT_ID}/api_error_stats/'
 TBLPROPERTIES (
     'table_type'                        = 'ICEBERG',
     'format'                            = 'parquet',
