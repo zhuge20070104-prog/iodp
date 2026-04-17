@@ -351,6 +351,7 @@ resource "aws_glue_trigger" "silver_hourly" {
   name     = "iodp-silver-hourly-trigger-${var.environment}"
   type     = "SCHEDULED"
   schedule = "cron(5 * * * ? *)"   # 每小时第 5 分钟（避免与整点冲突）
+  enabled  = var.triggers_enabled
 
   actions {
     job_name = aws_glue_job.silver_enrich_clicks.name
@@ -367,6 +368,7 @@ resource "aws_glue_trigger" "gold_hourly" {
   name     = "iodp-gold-hourly-trigger-${var.environment}"
   type     = "SCHEDULED"
   schedule = "cron(15 * * * ? *)"  # 每小时第 15 分钟（等 Silver 完成）
+  enabled  = var.triggers_enabled
 
   actions {
     job_name = aws_glue_job.gold_hourly_active_users.name
@@ -383,6 +385,7 @@ resource "aws_glue_trigger" "gold_daily" {
   name     = "iodp-gold-daily-trigger-${var.environment}"
   type     = "SCHEDULED"
   schedule = "cron(0 2 * * ? *)"   # UTC 02:00（北京时间 10:00）
+  enabled  = var.triggers_enabled
 
   actions {
     job_name = aws_glue_job.gold_incident_summary.name

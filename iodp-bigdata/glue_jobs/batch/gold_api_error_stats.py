@@ -47,7 +47,7 @@ processing_hour_start = processing_hour_end - timedelta(hours=1)
 print(f"Processing window: {processing_hour_start} ~ {processing_hour_end}")
 
 # ─── 读取 Silver 层 app_logs ───
-silver_df = spark.read.format("iceberg").load(
+error_logs_df = spark.read.format("iceberg").load(
     f"glue_catalog.{args['GLUE_DATABASE_SILVER']}.parsed_logs"
 ).filter(
     (col("event_timestamp") >= lit(processing_hour_start.isoformat())) &
@@ -66,12 +66,15 @@ all_logs_df = spark.read.format("iceberg").load(
     count("*").alias("total_requests")
 )
 
-error_stats_df = silver_df.groupBy(
+error_stats_df = error_logs_df.groupBy(
     date_trunc("hour", col("event_timestamp")).alias("stat_hour"),
     col("service_name"),
     col("error_code"),
 ).agg(
     count("*").alias("error_count"),
+    # 注意：p99 只覆盖"出错的请求"（error_logs_df 已按 log_level 过滤），
+    # 不是服务整体 p99。用于诊断"出错时有多慢"（接近超时阈值往往=超时引发的错）。
+    # 若需全量请求延迟趋势，应另起一个 Job 读 all_logs_df。
     percentile_approx("req_duration_ms", 0.99).alias("p99_duration_ms"),
     countDistinct("user_id").alias("unique_users"),
     # 采样 trace_id 供 Agent 关联（最多取 5 个）

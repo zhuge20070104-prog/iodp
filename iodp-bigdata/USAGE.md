@@ -1,3 +1,50 @@
+# IODP BigData 使用规范
+
+## 部署顺序：为什么必须三步 bootstrap
+
+Glue Database 只能由 Terraform 建（`aws_glue_catalog_database`），而 Iceberg Table 只能由 Athena DDL 建（`CREATE TABLE ... TBLPROPERTIES ('table_type' = 'ICEBERG')`）。Terraform Provider 对 Iceberg `TBLPROPERTIES` 支持有限，强行在 `aws_glue_catalog_table` 里写出来很啰嗦且容易漂移，所以本项目把"建表"这一步交给 Athena DDL。
+
+由此引出一个严格的线性依赖：
+
+```
+[1] Terraform apply              [2] Athena DDL                [3] Glue Triggers
+    创建 Database          →         创建 Iceberg Table    →         开始 cron 触发
+    (iodp_silver_dev)              (silver.parsed_logs)           Glue Job 正常写表
+```
+
+如果顺序错乱：
+
+| 错误场景 | 后果 |
+|---------|------|
+| 先跑 DDL，后跑 Terraform | Athena 报 `Database does not exist` ❌ |
+| Terraform 启用 Triggers 后才跑 DDL | Cron 触发的 Glue Job 报 `TableNotFoundException` ❌ |
+
+### Makefile 三段式部署
+
+```bash
+make init   # = deploy-infra + deploy-ddl + enable-triggers（一键完成）
+```
+
+或手动分步执行（排障时更清楚是哪一步失败）：
+
+```bash
+make deploy-infra      # [1/3] terraform apply -var='triggers_enabled=false'
+make deploy-ddl        # [2/3] bash scripts/apply_ddl.sh ENV ACCOUNT_ID REGION
+make enable-triggers   # [3/3] terraform apply -var='triggers_enabled=true'
+```
+
+### triggers_enabled 变量
+
+`terraform/variables.tf` 中的 `triggers_enabled`（默认 `true`）控制三个 `aws_glue_trigger` 资源的 `enabled` 属性：
+
+- **首次部署**：`make deploy-infra` 强制传 `-var='triggers_enabled=false'`，Triggers 创建但不激活，避免 cron 在 DDL 之前触发 Glue Job。
+- **启用阶段**：`make enable-triggers` 传 `-var='triggers_enabled=true'`，Triggers 切换到 active 状态。
+- **日常 `make deploy`**：不传 var，走变量默认值 `true`，Triggers 保持启用。
+
+这样 Terraform state 和 AWS 实际状态始终一致，不需要额外的 `aws glue start-trigger` / `stop-trigger` CLI 操作，也不会出现 drift。
+
+---
+
 # Athena 查询使用规范
 
 ## 两条消费线路

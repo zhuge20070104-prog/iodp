@@ -1,4 +1,4 @@
-.PHONY: init deploy destroy do-destroy help check-aws check-tools status clean output export-outputs
+.PHONY: init deploy deploy-infra deploy-ddl enable-triggers destroy do-destroy help check-aws check-tools status clean output export-outputs
 
 # ──────────────────────────────────────────────────────────────
 # 环境变量
@@ -38,29 +38,43 @@ check-aws: check-tools
 	@echo "✅ AWS 凭证验证通过 (账号: $(AWS_ACCOUNT_ID), 区域: $(AWS_REGION), 环境: $(ENV))"
 
 # ──────────────────────────────────────────────────────────────
-# 一次性初始化
+# 首次部署：三步 bootstrap（DB → Tables → Triggers）
+#   Glue Database 只能由 Terraform 建；Iceberg Table 只能由 Athena DDL 建。
+#   所以必须 infra 先于 DDL；Triggers 又必须后于 DDL（否则 cron 触发的
+#   Glue Job 会因表不存在而失败）。三个 target 分离这三阶段。
 # ──────────────────────────────────────────────────────────────
-init: check-aws
+init: deploy-infra deploy-ddl enable-triggers
 	@echo ""
 	@echo "=========================================="
-	@echo " IODP BigData 数据层部署 ($(ENV))"
+	@echo " ✅ IODP BigData 首次部署完成（$(ENV)）"
 	@echo "=========================================="
-	@echo ""
-	@echo "🏗️  步骤 1/3: 初始化 Terraform..."
-	cd $(TF_DIR) && terraform init
-	@echo ""
-	@echo "🏗️  步骤 2/3: 规划基础设施..."
-	cd $(TF_DIR) && terraform plan $(TF_VARS)
-	@echo ""
-	@echo "🏗️  步骤 3/3: 部署基础设施 (VPC + MSK + S3 + Glue + DynamoDB + Athena)..."
-	cd $(TF_DIR) && terraform apply $(TF_VARS) -auto-approve
-	@echo ""
-	@echo "✅ BigData 数据层部署完成！"
-	@echo ""
 	@cd $(TF_DIR) && terraform output
 
+# 阶段 1：部署基础设施（Triggers 保持关闭，等 DDL 执行完再开）
+deploy-infra: check-aws
+	@echo ""
+	@echo "🏗️  [1/3] 部署基础设施（Triggers 暂时关闭）..."
+	cd $(TF_DIR) && terraform init
+	cd $(TF_DIR) && terraform apply $(TF_VARS) -var='triggers_enabled=false' -auto-approve
+	@echo "✅ 基础设施就绪：Glue Database / Job 已创建，Triggers 暂未启用"
+
+# 阶段 2：执行 Athena DDL（在上面建好的 Database 里建 Iceberg Table）
+deploy-ddl: check-aws
+	@if [ -z "$(AWS_ACCOUNT_ID)" ]; then echo "❌ 无法获取 AWS_ACCOUNT_ID"; exit 1; fi
+	@echo ""
+	@echo "🗂️  [2/3] 执行 Athena DDL（建 7 张 Iceberg 表）..."
+	bash scripts/apply_ddl.sh $(ENV) $(AWS_ACCOUNT_ID) $(AWS_REGION)
+	@echo "✅ DDL 执行完成"
+
+# 阶段 3：启用 Glue Triggers（cron 开始正常触发批处理作业）
+enable-triggers: check-aws
+	@echo ""
+	@echo "⏰  [3/3] 启用 Glue Triggers..."
+	cd $(TF_DIR) && terraform apply $(TF_VARS) -var='triggers_enabled=true' -auto-approve
+	@echo "✅ Triggers 已启用（Silver 每小时 :05 / Gold 每小时 :15 / Daily UTC 02:00）"
+
 # ──────────────────────────────────────────────────────────────
-# 日常部署（更新 Glue Job / 配置变更）
+# 日常部署（更新 Glue Job / 配置变更，Triggers 状态沿用默认 true）
 # ──────────────────────────────────────────────────────────────
 deploy: check-aws
 	@echo "📦 [BigData] 更新基础设施..."
@@ -139,8 +153,14 @@ output:
 help:
 	@echo "IODP BigData 数据层 Makefile"
 	@echo ""
-	@echo "  make init              首次部署基础设施"
-	@echo "  make deploy            更新基础设施"
+	@echo "首次部署（严格按顺序）："
+	@echo "  make init              一键 bootstrap = deploy-infra + deploy-ddl + enable-triggers"
+	@echo "  make deploy-infra      [1/3] terraform apply（Triggers 关闭）"
+	@echo "  make deploy-ddl        [2/3] Athena 建 7 张 Iceberg 表"
+	@echo "  make enable-triggers   [3/3] 启用 Glue 定时触发器"
+	@echo ""
+	@echo "日常运维："
+	@echo "  make deploy            更新基础设施（Triggers 沿用当前状态）"
 	@echo "  make destroy           销毁所有资源"
 	@echo "  make status            查看部署状态"
 	@echo "  make output            显示 Terraform 输出"

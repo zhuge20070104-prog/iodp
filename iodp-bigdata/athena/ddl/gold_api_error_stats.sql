@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.api_error_stats (
     total_requests    BIGINT       COMMENT '该小时该服务总请求数',
     error_count       BIGINT       COMMENT '该错误码出现次数',
     error_rate        DOUBLE       COMMENT '错误率 = error_count / total_requests',
-    p99_duration_ms   DOUBLE       COMMENT 'P99 响应时间（毫秒）',
+    p99_duration_ms   DOUBLE       COMMENT 'P99 响应时间（毫秒，仅统计出错的请求，不是服务整体 p99）',
     unique_users      BIGINT       COMMENT '受影响的去重用户数',
     sample_trace_ids  ARRAY<STRING> COMMENT '最多 5 个 trace_id 样本',
     environment       STRING,

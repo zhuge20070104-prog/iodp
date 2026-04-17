@@ -15,7 +15,7 @@ from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql.functions import (
-    col, current_timestamp, lit, row_number, when,
+    coalesce, col, current_timestamp, lit, row_number,
 )
 from pyspark.sql.window import Window
 
@@ -57,10 +57,10 @@ deduped_df = bronze_df \
     .filter(col("_rn") == 1) \
     .drop("_rn")
 
-# ─── 3. 补充维度：对缺失城市的记录用 country_code 兜底 ───
+# ─── 3. 补充维度：city 缺失时退到 country_code，再缺到 "unknown" ───
 enriched_df = deduped_df.withColumn(
     "city",
-    when(col("city").isNull(), lit("unknown")).otherwise(col("city"))
+    coalesce(col("city"), col("country_code"), lit("unknown"))
 ).withColumn(
     "event_date", col("event_timestamp").cast("date")
 ).withColumn(
@@ -77,17 +77,20 @@ iceberg_merge_dedup(
 )
 
 output_count = enriched_df.count()
+dedup_removed = input_count - output_count
 
 # ─── 5. 血缘 ───
+# 去重丢掉的行是 Kafka at-least-once 预期内的重复，不是 DQ 死信；
+# 把去重数量塞进 transformation 字符串，dead_letter 字段保持 0。
 write_lineage_event(
     source_table=f"s3://iodp-bronze-{args['ENVIRONMENT']}/clickstream/",
     target_table=f"s3://iodp-silver-{args['ENVIRONMENT']}/enriched_clicks/",
-    transformation="DEDUP(event_id) + ENRICH_CITY",
+    transformation=f"DEDUP(event_id) removed {dedup_removed} + ENRICH_CITY",
     job_name=args["JOB_NAME"],
     job_run_id=args.get("JOB_RUN_ID", "unknown"),
     record_count_in=input_count,
     record_count_out=output_count,
-    record_count_dead_letter=input_count - output_count,
+    record_count_dead_letter=0,
     lineage_table=args["LINEAGE_TABLE"],
 )
 

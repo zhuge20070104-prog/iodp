@@ -96,3 +96,11 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+# ─── Triggers ───
+
+variable "triggers_enabled" {
+  description = "Whether Glue scheduled triggers are active. Keep false on first deploy until Athena DDL has created the Iceberg tables; flip to true afterwards."
+  type        = bool
+  default     = true
+}

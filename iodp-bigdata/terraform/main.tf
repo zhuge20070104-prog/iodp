@@ -101,6 +101,7 @@ module "compute" {
   dq_threshold_config_table_arn  = module.dynamodb.dq_threshold_config_table_arn
   dq_threshold_config_table_name = module.dynamodb.dq_threshold_config_table_name
   glue_catalog_id                = data.aws_caller_identity.current.account_id
+  triggers_enabled               = var.triggers_enabled
   tags                           = local.mandatory_tags
 }
 

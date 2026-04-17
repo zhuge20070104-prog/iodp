@@ -82,3 +82,11 @@ variable "opensearch_collection_arn" {
   type        = string
   default     = ""
 }
+
+# ─── Deployment orchestration ───
+
+variable "triggers_enabled" {
+  description = "Whether Glue scheduled triggers are active. Set false during first deploy so cron does not fire before Athena DDL has created Iceberg tables."
+  type        = bool
+  default     = true
+}

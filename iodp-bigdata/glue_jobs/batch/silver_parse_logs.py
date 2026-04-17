@@ -77,18 +77,21 @@ iceberg_merge_dedup(
 )
 
 output_count = silver_df.count()
-print(f"Silver records written: {output_count}")
+dedup_removed = input_count - output_count
+print(f"Silver records written: {output_count} (deduped {dedup_removed})")
 
 # ─── 5. 血缘记录 ───
+# 去重丢掉的行是 Kafka at-least-once 预期内的重复，不是 DQ 死信；
+# 把去重数量塞进 transformation 字符串，dead_letter 字段保持 0。
 write_lineage_event(
     source_table=f"s3://iodp-bronze-{args['ENVIRONMENT']}/app_logs/",
     target_table=f"s3://iodp-silver-{args['ENVIRONMENT']}/parsed_logs/",
-    transformation="DEDUP(log_id) + TYPE_CAST",
+    transformation=f"DEDUP(log_id) removed {dedup_removed} + TYPE_CAST",
     job_name=args["JOB_NAME"],
     job_run_id=args.get("JOB_RUN_ID", "unknown"),
     record_count_in=input_count,
     record_count_out=output_count,
-    record_count_dead_letter=input_count - output_count,
+    record_count_dead_letter=0,
     lineage_table=args["LINEAGE_TABLE"],
 )
 
