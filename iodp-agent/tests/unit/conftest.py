@@ -17,7 +17,7 @@ def mock_settings(monkeypatch):
         agent_state_table="test-state-table",
         agent_jobs_table="test-jobs-table",
         dq_reports_table="test-dq-table",
-        opensearch_endpoint="https://test.us-east-1.aoss.amazonaws.com",
+        vector_bucket_name="iodp-rag-test",
         bedrock_model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
         environment="test",
         max_clarification_iterations=3,

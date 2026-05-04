@@ -22,6 +22,8 @@ kafka_topics = [
 # Observability
 alarm_email = "data-engineering-oncall@company.com"
 
-# OpenSearch
-opensearch_endpoint       = "https://xxxxxxxx.us-east-1.aoss.amazonaws.com"
-opensearch_collection_arn = "arn:aws:aoss:us-east-1:987654321098:collection/xxxxxxxx"
+# S3 Vectors（vector bucket + indexes 由 iodp-agent 项目创建）
+# 部署完 iodp-agent terraform 后，从其 outputs 复制以下两个值：
+vector_bucket_name = "iodp-rag-prod"
+vector_bucket_arn  = "arn:aws:s3vectors:us-east-1:987654321098:bucket/iodp-rag-prod"
+vector_index_name  = "incident_solutions"

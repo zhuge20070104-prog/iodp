@@ -1,5 +1,5 @@
 output "sns_alert_topic_arn" {
-  description = "SNS topic ARN for alarm notifications (consumed by opensearch_indexer module)"
+  description = "SNS topic ARN for alarm notifications (consumed by vector_indexer module)"
   value       = aws_sns_topic.alerts.arn
 }
 

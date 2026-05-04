@@ -12,14 +12,20 @@ variable "gold_bucket_name" {
   type        = string
 }
 
-variable "opensearch_endpoint" {
-  description = "OpenSearch Serverless collection endpoint URL"
+variable "vector_bucket_name" {
+  description = "S3 Vectors bucket name (write target)"
   type        = string
 }
 
-variable "opensearch_collection_arn" {
-  description = "OpenSearch Serverless collection ARN (for IAM policy)"
+variable "vector_bucket_arn" {
+  description = "S3 Vectors bucket ARN (for IAM policy)"
   type        = string
+}
+
+variable "vector_index_name" {
+  description = "S3 Vectors index name (default: incident_solutions)"
+  type        = string
+  default     = "incident_solutions"
 }
 
 variable "sns_alert_topic_arn" {

@@ -39,7 +39,7 @@ class ErrorLogEntry(TypedDict):
 
 
 class RAGDocument(TypedDict):
-    """从 OpenSearch 检索到的单条知识库文档"""
+    """从 S3 Vectors 检索到的单条知识库文档"""
     doc_id:          str
     title:           str
     content:         str

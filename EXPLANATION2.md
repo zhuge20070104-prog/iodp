@@ -512,3 +512,101 @@ Athena 返回结果里，`service_name` 字段自然就是 `order-service`。
         │
         ▼ RAG + Synthesizer → 最终报告
 ```
+
+---
+
+---
+
+## 第四部分：index_knowledge_base.py 是什么 — "冷启动 vs 热更新"
+
+### 一句话
+
+> 从 Athena 把 Gold 层 `incident_summary` 表的全部历史数据拉出来，一次性向量化后灌进 S3 Vectors。
+
+### 用通俗例子解释
+
+想象你在做一个**故障诊断 agent**，它需要"参考过去 3 年的故障工单"。
+
+```
+                    一次性"装满书架"           日常"自动上架新书"
+                    ┌───────────────────┐    ┌──────────────────┐
+                    │ index_knowledge_  │    │  vector_indexer   │
+                    │ base.py (脚本)    │    │  Lambda (事件驱动) │
+                    └───────────────────┘    └──────────────────┘
+                          │                          │
+                          ▼                          ▼
+                    Athena 全量 SELECT *      S3 Event ──► 单文件 Parquet
+                    (3年累积，比如 5 万条)    (今天新增的 100 条)
+                          │                          │
+                          ▼                          ▼
+                    Bedrock 批量 embedding    Bedrock 批量 embedding
+                          │                          │
+                          ▼                          ▼
+                    一次性灌入向量库          实时增量灌入
+```
+
+### 两个脚本的分工
+
+|  | `iodp-agent/scripts/index_knowledge_base.py` | `iodp-bigdata/lambda/vector_indexer/handler.py` |
+|---|---|---|
+| **触发**       | 人工命令行 (`make index-kb`)                 | S3 PutObject 自动事件 |
+| **数据源**     | Athena `SELECT * FROM gold.incident_summary` | 单个 parquet 文件 |
+| **数据量**     | 全量历史（一次几万条）                       | 增量（每次几十~几百条） |
+| **执行频率**   | 一次（首次部署）                             | 每次 Gold 层产出新文件 |
+| **用途**       | "冷启动" — 把已有数据灌入                    | "热更新" — 新故障当天就能被检索 |
+
+### 为什么"现在不需要了"——这话说得不准确
+
+**精确说法**：
+
+- 在你**首次部署**时是需要的（不然向量库空着，RAG 检索不到任何东西）；
+- **首次部署完成后**就不需要了，因为 vector_indexer Lambda 会自动处理新增数据。
+
+### 举例说明
+
+#### 场景 A：你今天第一次部署整个系统
+
+```
+时间 0:00   terraform apply 跑完，S3 Vectors bucket + 2 个 index 创建好（空的）
+时间 0:01   你启动 agent，问"昨晚支付失败"
+时间 0:01   agent 查 S3 Vectors → 0 篇文档 ❌
+            （因为 Gold 层的历史 incident_summary parquet 是 3 年前就存在的，
+             今天创建 vector bucket 时没人触发 S3 Event 回放历史）
+```
+
+→ **你需要 `index_knowledge_base.py`**：手动从 Athena 拉历史数据灌进去。
+
+```bash
+make index-kb   # 跑一次，5 万条历史故障被向量化
+```
+
+之后再问，agent 就能检索到了 ✅
+
+#### 场景 B：今天系统跑了 3 个月
+
+```
+Day 90   Glue Job 跑完产出 incident_summary/year=2026/month=05/day=04/abc.parquet
+Day 90   S3 自动触发事件 → vector_indexer Lambda 跑起来
+Day 90   Lambda 把今天新增的 200 条故障向量化、put_vectors 到 S3 Vectors index
+Day 90   向量库 = 历史 5 万 + 90 天 × 200 ≈ 6.8 万条
+```
+
+→ **不需要再跑** `index_knowledge_base.py`，Lambda 自己增量维护。
+
+### 关键区别总结
+
+| 对比项 | `index_knowledge_base.py` | `vector_indexer` Lambda |
+|---|---|---|
+| **本质**       | 离线批处理脚本                            | 事件驱动微服务 |
+| **耦合**       | 与 Athena 强耦合（直接读 Iceberg 表）      | 与 S3 强耦合（订阅 ObjectCreated 事件）|
+| **幂等性**     | put_vectors 同 key 覆盖；可多次重跑        | 同样幂等；重复事件会重写同一 key |
+| **存在的意义** | 冷启动 / 全量重建（embedding 模型升级时）  | 日常增量维护 |
+| **可被替代吗** | 可以，但替代成本高（要伪造 S3 Event 重放） | 不能轻易替代——是默认增量通道 |
+
+### 兼任"全量重建"应急工具
+
+embedding 模型升级（比如 Titan v2 → v3）、向量维度变更（1024 → 2048）时，
+现存所有向量都要重灌，这时 `index_knowledge_base.py` 就不只是冷启动用了——
+它是**重建数据库**的工具。
+
+---

@@ -1,32 +1,32 @@
-# terraform/modules/opensearch_indexer/main.tf
-# 事件驱动 OpenSearch 索引器
+# terraform/modules/vector_indexer/main.tf
+# 事件驱动 S3 Vectors 索引器（GA 2025-12）
 #
-# 改进：原来是离线脚本每天凌晨手动触发，现在改为：
-#   Gold S3 incident_summary/*.parquet 文件新增时 → S3 事件 → Lambda → OpenSearch
-# 这样新的故障工单数据在写入 Gold 层后几分钟内就能被 RAG Agent 检索到。
+# 架构：Gold S3 incident_summary/*.parquet 文件新增时
+#       → S3 事件 → Lambda → Bedrock Embedding → S3 Vectors put_vectors
+# 取代旧的 OpenSearch Serverless 方案，成本降低约 90%。
 #
 # 构建步骤（Lambda ZIP 需手动构建）:
-#   cd lambda/opensearch_indexer && pip install -r requirements.txt -t . && zip -r ../opensearch_indexer.zip .
+#   cd lambda/vector_indexer && pip install -r requirements.txt -t . && zip -r ../vector_indexer.zip .
 
 locals {
-  function_name = "iodp-opensearch-indexer-${var.environment}"
-  zip_path      = "${path.module}/../../../lambda/opensearch_indexer.zip"
+  function_name = "iodp-vector-indexer-${var.environment}"
+  zip_path      = "${path.module}/../../../lambda/vector_indexer.zip"
 }
 
 # ─── SQS DLQ（Lambda 失败时收集，避免静默丢失）───
 resource "aws_sqs_queue" "indexer_dlq" {
-  name                       = "iodp-opensearch-indexer-dlq-${var.environment}"
+  name                       = "iodp-vector-indexer-dlq-${var.environment}"
   message_retention_seconds  = 1209600  # 14 天
   visibility_timeout_seconds = 300
 
   tags = merge(var.tags, {
-    Purpose = "DLQ for failed OpenSearch indexing events"
+    Purpose = "DLQ for failed S3 Vectors indexing events"
   })
 }
 
 # ─── IAM Role ───
-resource "aws_iam_role" "opensearch_indexer" {
-  name = "iodp-opensearch-indexer-role-${var.environment}"
+resource "aws_iam_role" "vector_indexer" {
+  name = "iodp-vector-indexer-role-${var.environment}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -40,9 +40,9 @@ resource "aws_iam_role" "opensearch_indexer" {
   tags = var.tags
 }
 
-resource "aws_iam_role_policy" "opensearch_indexer" {
-  name = "iodp-opensearch-indexer-policy-${var.environment}"
-  role = aws_iam_role.opensearch_indexer.id
+resource "aws_iam_role_policy" "vector_indexer" {
+  name = "iodp-vector-indexer-policy-${var.environment}"
+  role = aws_iam_role.vector_indexer.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -65,10 +65,18 @@ resource "aws_iam_role_policy" "opensearch_indexer" {
         ]
       },
       {
-        Sid    = "OpenSearchServerless"
+        Sid    = "S3VectorsWrite"
         Effect = "Allow"
-        Action = ["aoss:APIAccessAll"]
-        Resource = [var.opensearch_collection_arn]
+        Action = [
+          "s3vectors:PutVectors",
+          "s3vectors:GetVectors",
+          "s3vectors:DeleteVectors",
+          "s3vectors:ListVectors",
+        ]
+        Resource = [
+          var.vector_bucket_arn,
+          "${var.vector_bucket_arn}/index/*",
+        ]
       },
       {
         Sid    = "SQSDlq"
@@ -87,9 +95,9 @@ resource "aws_iam_role_policy" "opensearch_indexer" {
 }
 
 # ─── Lambda Function ───
-resource "aws_lambda_function" "opensearch_indexer" {
+resource "aws_lambda_function" "vector_indexer" {
   function_name = local.function_name
-  role          = aws_iam_role.opensearch_indexer.arn
+  role          = aws_iam_role.vector_indexer.arn
   runtime       = "python3.12"
   handler       = "handler.handler"
   timeout       = 300
@@ -98,7 +106,8 @@ resource "aws_lambda_function" "opensearch_indexer" {
   filename         = local.zip_path
   source_code_hash = fileexists(local.zip_path) ? filebase64sha256(local.zip_path) : null
 
-  # 防止并发过高压垮 OpenSearch Serverless
+  # S3 Vectors 是 storage-first 架构，写入限速远比 OpenSearch Serverless 宽松，
+  # 但仍保留 reserved concurrency 以控制 Bedrock embedding 调用费率
   reserved_concurrent_executions = 2
 
   dead_letter_config {
@@ -107,18 +116,18 @@ resource "aws_lambda_function" "opensearch_indexer" {
 
   environment {
     variables = {
-      OPENSEARCH_ENDPOINT = var.opensearch_endpoint
-      INDEX_NAME          = "incident_solutions"
-      BEDROCK_REGION      = var.aws_region
-      ENVIRONMENT         = var.environment
-      BATCH_SIZE          = "50"
+      VECTOR_BUCKET_NAME = var.vector_bucket_name
+      INDEX_NAME         = var.vector_index_name
+      BEDROCK_REGION     = var.aws_region
+      ENVIRONMENT        = var.environment
+      BATCH_SIZE         = "50"
     }
   }
 
   tags = var.tags
 }
 
-resource "aws_cloudwatch_log_group" "opensearch_indexer" {
+resource "aws_cloudwatch_log_group" "vector_indexer" {
   name              = "/aws/lambda/${local.function_name}"
   retention_in_days = 14
   tags              = var.tags
@@ -129,7 +138,7 @@ resource "aws_s3_bucket_notification" "gold_incident_summary" {
   bucket = var.gold_bucket_name
 
   lambda_function {
-    lambda_function_arn = aws_lambda_function.opensearch_indexer.arn
+    lambda_function_arn = aws_lambda_function.vector_indexer.arn
     events              = ["s3:ObjectCreated:*"]
     filter_prefix       = "incident_summary/"
     filter_suffix       = ".parquet"
@@ -141,15 +150,15 @@ resource "aws_s3_bucket_notification" "gold_incident_summary" {
 resource "aws_lambda_permission" "s3_invoke" {
   statement_id  = "AllowS3Invoke"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.opensearch_indexer.function_name
+  function_name = aws_lambda_function.vector_indexer.function_name
   principal     = "s3.amazonaws.com"
   source_arn    = "arn:aws:s3:::${var.gold_bucket_name}"
 }
 
 # ─── CloudWatch 告警：索引失败率 ───
 resource "aws_cloudwatch_metric_alarm" "indexer_errors" {
-  alarm_name          = "iodp-opensearch-indexer-errors-${var.environment}"
-  alarm_description   = "OpenSearch indexer Lambda error rate high"
+  alarm_name          = "iodp-vector-indexer-errors-${var.environment}"
+  alarm_description   = "S3 Vectors indexer Lambda error rate high"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "Errors"
@@ -159,7 +168,7 @@ resource "aws_cloudwatch_metric_alarm" "indexer_errors" {
   threshold           = 3
 
   dimensions = {
-    FunctionName = aws_lambda_function.opensearch_indexer.function_name
+    FunctionName = aws_lambda_function.vector_indexer.function_name
   }
 
   alarm_actions = [var.sns_alert_topic_arn]

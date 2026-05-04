@@ -3,6 +3,8 @@
 RAG Agent 节点 v2
 改进：使用 get_error_logs() helper 读取 log_analyzer 子结构
 输出写入 state["rag"] (RAGOutput)
+
+后端：Amazon S3 Vectors（GA 2025-12 取代 OpenSearch Serverless，成本降低 ~90%）
 """
 
 from langchain_aws import ChatBedrock
@@ -10,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from ..state import AgentState, RAGDocument, RAGOutput, get_error_logs
 from src.config import settings
-from src.tools.opensearch_tool import vector_search
+from src.tools.s3_vectors_tool import vector_search
 
 RAG_QUERY_GENERATION_PROMPT = """
 你是一个检索专家。根据以下信息，生成一段用于向量检索的自然语言查询，
@@ -59,13 +61,13 @@ def rag_agent_node(state: AgentState) -> dict:
             query_text=rag_query,
             index_names=["product_docs", "incident_solutions"],
             top_k=5,
-            opensearch_endpoint=settings.opensearch_endpoint,
+            vector_bucket_name=settings.vector_bucket_name,
             region=settings.aws_region,
             filter_error_codes=error_codes if error_codes else None,
         )
     except Exception as e:
         import logging
-        logging.getLogger(__name__).error("OpenSearch vector search failed: %s", e)
+        logging.getLogger(__name__).error("S3 Vectors search failed: %s", e)
         raw_hits = []
 
     retrieved_docs: list[RAGDocument] = [

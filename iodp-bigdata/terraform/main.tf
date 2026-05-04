@@ -7,7 +7,7 @@
 #   streaming → compute (需要 MSK ARN/bootstrap)
 #   dynamodb → compute (需要 DQ/Lineage 表 ARN)
 #   compute + streaming → observability (需要 job 名称/集群名)
-#   observability → opensearch_indexer (需要 SNS topic ARN)
+#   observability → vector_indexer (需要 SNS topic ARN)
 #   storage + dynamodb → dlq_replay / replay_jobs
 
 terraform {
@@ -121,7 +121,7 @@ module "observability" {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  增值功能模块（DLQ 重放、OpenSearch 索引、Replay Jobs）
+#  增值功能模块（DLQ 重放、S3 Vectors 索引、Replay Jobs）
 # ════════════════════════════════════════════════════════════════
 
 module "dlq_replay" {
@@ -142,14 +142,15 @@ module "replay_jobs" {
   tags               = local.mandatory_tags
 }
 
-module "opensearch_indexer" {
-  source = "./modules/opensearch_indexer"
+module "vector_indexer" {
+  source = "./modules/vector_indexer"
 
-  environment               = var.environment
-  aws_region                = var.aws_region
-  gold_bucket_name          = module.storage.gold_bucket_name
-  opensearch_endpoint       = var.opensearch_endpoint
-  opensearch_collection_arn = var.opensearch_collection_arn
-  sns_alert_topic_arn       = module.observability.sns_alert_topic_arn
-  tags                      = local.mandatory_tags
+  environment         = var.environment
+  aws_region          = var.aws_region
+  gold_bucket_name    = module.storage.gold_bucket_name
+  vector_bucket_name  = var.vector_bucket_name
+  vector_bucket_arn   = var.vector_bucket_arn
+  vector_index_name   = var.vector_index_name
+  sns_alert_topic_arn = module.observability.sns_alert_topic_arn
+  tags                = local.mandatory_tags
 }

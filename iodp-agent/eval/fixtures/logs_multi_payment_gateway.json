@@ -1,0 +1,44 @@
+{
+  "error_logs": [
+    {
+      "stat_hour": "2026-04-18 22:00:00",
+      "service_name": "payment-service",
+      "error_code": "E2001",
+      "error_rate": 0.22,
+      "error_count": 660,
+      "total_requests": 3000,
+      "p99_duration_ms": 5100.0,
+      "unique_users": 95,
+      "sample_trace_ids": ["trace-pay-m1", "trace-pay-m2"],
+      "error_message": "Payment gateway failed (E2001)",
+      "stack_trace": "PaymentService.charge(...) -> timeout",
+      "trace_id": "trace-pay-m1",
+      "event_timestamp": "2026-04-18T22:30:00Z"
+    },
+    {
+      "stat_hour": "2026-04-18 22:00:00",
+      "service_name": "api-gateway",
+      "error_code": "E3001",
+      "error_rate": 0.17,
+      "error_count": 850,
+      "total_requests": 5000,
+      "p99_duration_ms": 7800.0,
+      "unique_users": 180,
+      "sample_trace_ids": ["trace-gw-m1", "trace-gw-m2"],
+      "error_message": "Upstream timeout (E3001)",
+      "stack_trace": "ApiGateway.route(...) -> ReadTimeoutException",
+      "trace_id": "trace-gw-m1",
+      "event_timestamp": "2026-04-18T22:35:00Z"
+    }
+  ],
+  "rag_docs": [
+    {
+      "doc_id": "kb-E2001-01",
+      "title": "E2001 Payment Gateway 错误",
+      "content": "E2001 和 E3001 同时出现时，先查网关上游，再查支付下游。",
+      "doc_type": "incident_solution",
+      "relevance_score": 0.9,
+      "error_codes": ["E2001", "E3001"]
+    }
+  ]
+}

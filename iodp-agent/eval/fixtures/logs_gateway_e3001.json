@@ -1,0 +1,29 @@
+{
+  "error_logs": [
+    {
+      "stat_hour": "2026-04-18 15:00:00",
+      "service_name": "api-gateway",
+      "error_code": "E3001",
+      "error_rate": 0.28,
+      "error_count": 1400,
+      "total_requests": 5000,
+      "p99_duration_ms": 9800.0,
+      "unique_users": 230,
+      "sample_trace_ids": ["trace-gw-001", "trace-gw-002", "trace-gw-003"],
+      "error_message": "Upstream timeout (E3001): gateway -> order-service",
+      "stack_trace": "ApiGateway.route(...) -> HttpClient.send(...) -> ReadTimeoutException",
+      "trace_id": "trace-gw-001",
+      "event_timestamp": "2026-04-18T15:40:00Z"
+    }
+  ],
+  "rag_docs": [
+    {
+      "doc_id": "kb-E3001-01",
+      "title": "E3001 网关超时处置手册",
+      "content": "E3001 代表网关上游超时；>20% 错误率属于 P0 事故，应立即触发 On-call。",
+      "doc_type": "incident_solution",
+      "relevance_score": 0.95,
+      "error_codes": ["E3001"]
+    }
+  ]
+}

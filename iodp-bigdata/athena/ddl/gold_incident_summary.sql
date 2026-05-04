@@ -1,6 +1,6 @@
 -- athena/ddl/gold_incident_summary.sql
 -- Gold 层故障事件摘要（gold_incident_summary.py 按 stat_date 分区覆盖写入）
--- 下游：S3 Event → opensearch_indexer Lambda → Bedrock Embedding → OpenSearch RAG 知识库
+-- 下游：S3 Event → vector_indexer Lambda → Bedrock Embedding → S3 Vectors RAG 知识库
 
 CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.incident_summary (
     incident_id          STRING       COMMENT '故障 ID，格式: INC-{date}-{service}-{error_code}',

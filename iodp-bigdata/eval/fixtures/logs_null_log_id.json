@@ -1,0 +1,12 @@
+[
+  {"log_id": "n1",  "log_level": "ERROR"},
+  {"log_id": null,  "log_level": "ERROR"},
+  {"log_id": "n2",  "log_level": "WARN"},
+  {"log_id": null,  "log_level": "INFO"},
+  {"log_id": "n3",  "log_level": "INFO"},
+  {"log_id": null,  "log_level": "DEBUG"},
+  {"log_id": "n4",  "log_level": "ERROR"},
+  {"log_id": null,  "log_level": "DEBUG"},
+  {"log_id": "n5",  "log_level": "WARN"},
+  {"log_id": "n6",  "log_level": "INFO"}
+]

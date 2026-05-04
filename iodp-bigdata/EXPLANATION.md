@@ -134,33 +134,36 @@ aws glue start-job-run \
   --arguments '{"--TABLE_NAME":"bronze_clickstream","--BATCH_DATE":"2026-04-06"}'
 ```
 
-### 2.4 terraform/modules/opensearch_indexer/ — Gold 数据索引到 OpenSearch
+### 2.4 terraform/modules/vector_indexer/ — Gold 数据索引到 S3 Vectors
 
-管理事件驱动的 OpenSearch 索引 Lambda，当 Gold 层产出 incident_summary 数据时自动触发索引。
+管理事件驱动的 S3 Vectors 索引 Lambda，当 Gold 层产出 incident_summary 数据时自动触发索引。
+（替代了旧的 OpenSearch Serverless 方案，成本降低约 90%。S3 Vectors 于 2025-12 GA。）
 
 #### 它创建了什么
 
 - **S3 Event Notification**：当 `gold_bucket` 下 `incident_summary/` 路径有新 `.parquet` 文件写入时，触发 Lambda。
-- **Lambda 函数** `iodp-opensearch-indexer-{env}`：Python 3.12，1024MB 内存，5 分钟超时。
+- **Lambda 函数** `iodp-vector-indexer-{env}`：Python 3.12，1024MB 内存，5 分钟超时。
 - **SQS Dead Letter Queue**：Lambda 处理失败的事件会进入 SQS DLQ，消息保留 14 天。
-- **IAM Role**：允许读 Gold bucket、调用 Bedrock Embedding API（`amazon.titan-embed-text-v2:0`）、写 OpenSearch Serverless、发 SQS、写 CloudWatch Logs。
+- **IAM Role**：允许读 Gold bucket、调用 Bedrock Embedding API（`amazon.titan-embed-text-v2:0`）、`s3vectors:PutVectors` 等写入权限、发 SQS、写 CloudWatch Logs。
 - **CloudWatch Alarm**：Lambda 连续 2 个 5 分钟窗口内错误超 3 次 → 发 SNS 告警。
+
+注意：vector bucket 与 index 物理资源由 `iodp-agent` 项目的 Terraform 创建，本模块通过 tfvars (`vector_bucket_name` / `vector_bucket_arn`) 引用。
 
 #### 它在数据流中的位置
 
 ```
 gold_incident_summary.py 写 parquet 到 Gold bucket
     ↓ S3 Event Notification（自动触发）
-Lambda: 读 parquet → Bedrock 生成 embedding → 写入 OpenSearch index "incident_solutions"
+Lambda: 读 parquet → Bedrock 生成 embedding → put_vectors 到 S3 Vectors index "incident_solutions"
     ↓
-Agent Log Analyzer 通过 OpenSearch 做语义搜索，找历史相似事件
+Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
 ```
 
 #### 关键设计
 
-- `reserved_concurrent_executions = 2`：控制对 OpenSearch Serverless 的并发压力。
-- `BATCH_SIZE = 50`：每次最多索引 50 条文档。
-- 使用 Bedrock Titan Embedding 做向量化，支持语义搜索（不只是关键词匹配）。
+- `reserved_concurrent_executions = 2`：控制 Bedrock embedding 调用的并发与费率。
+- `BATCH_SIZE = 50`：每次最多索引 50 条向量（S3 Vectors `put_vectors` 单次上限 500）。
+- 使用 Bedrock Titan Embedding（1024 维, normalize=True）配合 cosine distance 做向量化，支持语义搜索。
 
 ---
 
@@ -286,8 +289,8 @@ Agent Log Analyzer 通过 OpenSearch 做语义搜索，找历史相似事件
               ▼
          Gold incident_summary
               │
-              │ terraform/modules/opensearch_indexer/
-              │ (S3 Event → Lambda → Bedrock Embedding → OpenSearch)
+              │ terraform/modules/vector_indexer/
+              │ (S3 Event → Lambda → Bedrock Embedding → S3 Vectors)
               ▼
          Agent 语义搜索历史相似事件
 
@@ -317,4 +320,4 @@ Agent Log Analyzer 通过 OpenSearch 做语义搜索，找历史相似事件
 | `dynamodb` | 3 张 DynamoDB 元数据表 | 所有 Glue Job（写 DQ 报告 + 血缘）| 随 Job 运行自动写入 |
 | `dlq_replay` | 1 个 Lambda + EventBridge | 运维手动 | CLI 调用或启用 EventBridge 规则 |
 | `replay_jobs` | 2 个 Glue Batch Job | 运维手动 | `aws glue start-job-run` |
-| `opensearch_indexer` | 1 个 Lambda + SQS DLQ + 告警 | S3 Event 自动触发 | Gold incident_summary 写入新 parquet 时 |
+| `vector_indexer` | 1 个 Lambda + SQS DLQ + 告警 | S3 Event 自动触发 | Gold incident_summary 写入新 parquet 时 |

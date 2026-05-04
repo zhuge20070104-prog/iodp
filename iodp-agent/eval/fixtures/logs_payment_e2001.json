@@ -1,0 +1,29 @@
+{
+  "error_logs": [
+    {
+      "stat_hour": "2026-04-18 23:00:00",
+      "service_name": "payment-service",
+      "error_code": "E2001",
+      "error_rate": 0.18,
+      "error_count": 540,
+      "total_requests": 3000,
+      "p99_duration_ms": 4200.0,
+      "unique_users": 78,
+      "sample_trace_ids": ["trace-pay-001", "trace-pay-002", "trace-pay-003"],
+      "error_message": "Payment gateway returned non-200 (E2001)",
+      "stack_trace": "PaymentService.charge(...) -> GatewayClient.post(...) -> SocketTimeoutException",
+      "trace_id": "trace-pay-001",
+      "event_timestamp": "2026-04-18T23:15:00Z"
+    }
+  ],
+  "rag_docs": [
+    {
+      "doc_id": "kb-E2001-01",
+      "title": "E2001 Payment Gateway 错误处理手册",
+      "content": "E2001 表示支付网关返回非 2xx；常见原因：下游限流、网络抖动、证书过期。建议联系 payment SRE 检查 gateway 状态。",
+      "doc_type": "incident_solution",
+      "relevance_score": 0.93,
+      "error_codes": ["E2001"]
+    }
+  ]
+}

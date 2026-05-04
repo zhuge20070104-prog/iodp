@@ -2,7 +2,7 @@
 """
 Glue Batch Job: Gold api_error_stats → Gold incident_summary
 每天运行（凌晨），识别过去 24 小时内的故障事件，生成自然语言摘要。
-输出 JSON Lines 格式，供 Lambda 向量化后写入 OpenSearch RAG 知识库。
+输出 JSON Lines 格式，供 vector_indexer Lambda 向量化后写入 S3 Vectors RAG 知识库。
 
 识别规则：同一 service_name + error_code 连续 ≥ 2 小时 error_rate > 5%，
           视为一次 incident。

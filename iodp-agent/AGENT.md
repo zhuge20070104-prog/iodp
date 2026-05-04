@@ -25,7 +25,7 @@ Lambda Container (Mangum → FastAPI → LangGraph)
     ├──→ Bedrock Claude 3.5 Sonnet (LLM 推理)
     ├──→ Athena (查 v_error_log_enriched 视图)
     ├──→ DynamoDB (Job 状态 + Checkpointer + DQ 报告)
-    └──→ OpenSearch Serverless (RAG 向量搜索)
+    └──→ S3 Vectors (RAG 向量搜索 — GA 2025-12)
 ```
 
 ---
@@ -50,14 +50,14 @@ iodp-agent/
 │   │   └── nodes/
 │   │       ├── router_agent.py       # 意图分类 + 信息提取
 │   │       ├── log_analyzer_agent.py # Athena SQL 生成 + 执行
-│   │       ├── rag_agent.py          # OpenSearch 向量检索
+│   │       ├── rag_agent.py          # S3 Vectors 向量检索
 │   │       ├── reply_agent.py        # 用户友好回复生成
 │   │       └── bug_report_agent.py   # 结构化 Bug 报告生成
 │   │
 │   └── tools/
 │       ├── athena_tool.py      # Athena 查询封装（SQL 安全校验）
 │       ├── dynamodb_tool.py    # DQ 报告查询（跨项目读 bigdata）
-│       └── opensearch_tool.py  # Bedrock Embedding + kNN 搜索
+│       └── s3_vectors_tool.py  # Bedrock Embedding + S3 Vectors query_vectors
 │
 ├── frontend/
 │   ├── package.json            # Vite + React 18
@@ -65,7 +65,7 @@ iodp-agent/
 │   └── src/App.jsx             # 聊天界面
 │
 ├── terraform/
-│   ├── main.tf                 # Lambda + API Gateway + ECR + OpenSearch + S3/CloudFront
+│   ├── main.tf                 # Lambda + API Gateway + ECR + S3 Vectors + S3/CloudFront
 │   ├── variables.tf
 │   ├── outputs.tf
 │   └── modules/dynamodb/       # Agent State + Tickets + Jobs 三张 DynamoDB 表
@@ -120,11 +120,11 @@ DynamoDB 表                            log_analyzer_agent.py
 iodp-dq-reports-{env}       ←───────  dynamodb_tool.py 查 DQ 报告
 (Streaming Job DQ 校验结果)            判断是否为数据质量问题，排除假告警
 
-OpenSearch 索引                        rag_agent.py
-incident_solutions           ←───────  opensearch_tool.py 向量搜索
+S3 Vectors 索引                        rag_agent.py
+incident_solutions           ←───────  s3_vectors_tool.py 向量搜索
 (Gold incident_summary 自动灌入)       "历史上有没有类似故障？"
 
-product_docs                 ←───────  opensearch_tool.py 向量搜索
+product_docs                 ←───────  s3_vectors_tool.py 向量搜索
 (运维手册，人工离线导入)               "这个错误码怎么排查？"
 ```
 
@@ -140,7 +140,7 @@ product_docs                 ←───────  opensearch_tool.py 向量
 | **DynamoDB** | Job 状态 + Checkpointer + Tickets | PAY_PER_REQUEST，serverless |
 | **Bedrock** | Claude 3.5 Sonnet LLM + Titan Embedding | 托管推理，无需部署模型 |
 | **Athena** | 查询 BigData Gold/Silver 层 | 按扫描量计费，Serverless |
-| **OpenSearch Serverless** | RAG 向量搜索 | kNN 支持，按 OCU 计费 |
+| **S3 Vectors** | RAG 向量搜索（GA 2025-12） | 存算分离 / 按 PUT+存储+查询计费，比 OpenSearch Serverless 便宜 ~90% |
 | **S3** | 前端静态文件 + Athena 结果 | 标准对象存储 |
 | **CloudFront** | 前端 CDN + HTTPS | 边缘缓存，全球加速 |
 | **Cognito** | JWT 认证（可选） | 免费档 5 万 MAU |

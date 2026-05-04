@@ -1,0 +1,29 @@
+{
+  "error_logs": [
+    {
+      "stat_hour": "2026-04-19 10:00:00",
+      "service_name": "order-service",
+      "error_code": "E4001",
+      "error_rate": 0.02,
+      "error_count": 15,
+      "total_requests": 800,
+      "p99_duration_ms": 320.0,
+      "unique_users": 8,
+      "sample_trace_ids": ["trace-biz-001"],
+      "error_message": "Business rule violation (E4001): missing required field 'delivery_address'",
+      "stack_trace": null,
+      "trace_id": "trace-biz-001",
+      "event_timestamp": "2026-04-19T10:15:00Z"
+    }
+  ],
+  "rag_docs": [
+    {
+      "doc_id": "kb-E4001-01",
+      "title": "E4001 业务参数校验错误",
+      "content": "E4001 多为客户端提交参数缺失。检查前端表单校验是否和后端对齐。",
+      "doc_type": "product_doc",
+      "relevance_score": 0.81,
+      "error_codes": ["E4001"]
+    }
+  ]
+}

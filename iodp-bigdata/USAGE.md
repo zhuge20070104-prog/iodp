@@ -62,9 +62,9 @@ Silver 数据
     │        按 session 聚合：会话时长、漏斗标记、设备/地理、购买金额
     │
     └──→ Agent 线路（给 AI 故障诊断用的）
-         ├── gold.incident_summary      → OpenSearch RAG 知识库
+         ├── gold.incident_summary      → S3 Vectors RAG 知识库
          │   每天识别持续 >=2 小时的高错误率故障，生成摘要
-         │   经 Bedrock Embedding 向量化后写入 OpenSearch
+         │   经 Bedrock Embedding 向量化后 put_vectors 到 S3 Vectors index
          │   Agent 用途："历史上有没有类似的故障？当时怎么解决的？"
          │
          └── v_error_log_enriched（视图）→ Agent 实时查询入口
@@ -206,9 +206,9 @@ Agent 诊断故障时，先查该时段的 DQ 报告。如果发现 DQ 失败率
 
 ---
 
-## OpenSearch Indexer SQS DLQ 用途与重新消费
+## Vector Indexer SQS DLQ 用途与重新消费
 
-`iodp-opensearch-indexer-dlq-{env}` 是 OpenSearch 索引 Lambda 的死信队列，定义在 `terraform/modules/opensearch_indexer/main.tf`。
+`iodp-vector-indexer-dlq-{env}` 是 S3 Vectors 索引 Lambda 的死信队列，定义在 `terraform/modules/vector_indexer/main.tf`。
 
 ### 什么时候会有消息进去
 
@@ -240,22 +240,22 @@ Gold S3 写入新 parquet
 
 ### 如何重新消费
 
-排查并修复失败原因（OpenSearch 不可达、Bedrock 限流等）后，手动取出消息重新触发：
+排查并修复失败原因（S3 Vectors 限流、Bedrock 限流等）后，手动取出消息重新触发：
 
 ```bash
 # 1. 从 DLQ 取消息
 aws sqs receive-message \
-  --queue-url https://sqs.us-east-1.amazonaws.com/{account}/iodp-opensearch-indexer-dlq-prod
+  --queue-url https://sqs.us-east-1.amazonaws.com/{account}/iodp-vector-indexer-dlq-prod
 
 # 2. 拿到 Body 里的 S3 Event JSON，喂给同一个 Lambda
 aws lambda invoke \
-  --function-name iodp-opensearch-indexer-prod \
+  --function-name iodp-vector-indexer-prod \
   --payload '上一步拿到的 Body 内容' \
   response.json
 
 # 3. 成功后删除 DLQ 里的消息
 aws sqs delete-message \
-  --queue-url https://sqs.us-east-1.amazonaws.com/{account}/iodp-opensearch-indexer-dlq-prod \
+  --queue-url https://sqs.us-east-1.amazonaws.com/{account}/iodp-vector-indexer-dlq-prod \
   --receipt-handle "从 step 1 拿到的 ReceiptHandle"
 ```
 
@@ -290,7 +290,7 @@ aws_iam_role（自定义角色）
 |---|---|---|
 | `terraform/modules/replay_jobs/main.tf:30-33` | `AWSGlueServiceRole`（Glue 基础权限） | S3 replay/bronze + Glue Catalog + DynamoDB lineage |
 | `terraform/modules/dlq_replay/main.tf:18-65` | 无（Lambda 不需要托管策略） | S3 dead_letter 读 + replay 写 + CloudWatch Logs |
-| `terraform/modules/opensearch_indexer/main.tf:28-87` | 无 | S3 Gold 读 + Bedrock + OpenSearch + SQS DLQ + CloudWatch Logs |
+| `terraform/modules/vector_indexer/main.tf:28-87` | 无 | S3 Gold 读 + Bedrock + S3 Vectors + SQS DLQ + CloudWatch Logs |
 
 Lambda 的基础权限（CloudWatch Logs）直接写在内联策略里，不需要额外的托管策略。Glue Job 因为涉及 Spark 集群管理、临时文件等复杂运行时，AWS 打包了一个专用的托管策略。
 
@@ -434,7 +434,7 @@ module "storage" {
 
 ### 下游依赖
 
-`compute`、`dlq_replay`、`replay_jobs`、`opensearch_indexer` 模块都依赖 storage 模块输出的 bucket name 和 ARN。
+`compute`、`dlq_replay`、`replay_jobs`、`vector_indexer` 模块都依赖 storage 模块输出的 bucket name 和 ARN。
 
 ---
 

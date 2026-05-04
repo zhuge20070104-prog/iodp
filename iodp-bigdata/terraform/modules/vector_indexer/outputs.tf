@@ -1,9 +1,9 @@
 output "lambda_arn" {
-  value = aws_lambda_function.opensearch_indexer.arn
+  value = aws_lambda_function.vector_indexer.arn
 }
 
 output "lambda_function_name" {
-  value = aws_lambda_function.opensearch_indexer.function_name
+  value = aws_lambda_function.vector_indexer.function_name
 }
 
 output "dlq_url" {

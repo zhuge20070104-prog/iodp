@@ -1,0 +1,7 @@
+[
+  {"log_id": "a1", "log_level": "ERROR", "error_code": "E1001", "service_name": "auth"},
+  {"log_id": "a2", "log_level": "WARN",  "error_code": "E2001", "service_name": "pay"},
+  {"log_id": "a3", "log_level": "INFO",  "error_code": null,    "service_name": "api"},
+  {"log_id": "a4", "log_level": "DEBUG", "error_code": null,    "service_name": "api"},
+  {"log_id": "a5", "log_level": "ERROR", "error_code": "E3001", "service_name": "gw"}
+]

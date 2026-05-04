@@ -1,0 +1,12 @@
+[
+  {"log_id": "e1",  "error_code": "E1001"},
+  {"log_id": "e2",  "error_code": "E2001"},
+  {"log_id": "e3",  "error_code": "E3001"},
+  {"log_id": "e4",  "error_code": null},
+  {"log_id": "e5",  "error_code": "E9999"},
+  {"log_id": "e6",  "error_code": "BAD_CODE"},
+  {"log_id": "e7",  "error_code": "XYZ"},
+  {"log_id": "e8",  "error_code": "DROP_TABLE"},
+  {"log_id": "e9",  "error_code": "E7777"},
+  {"log_id": "e10", "error_code": "E5001"}
+]

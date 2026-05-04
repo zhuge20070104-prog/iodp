@@ -1,0 +1,29 @@
+{
+  "error_logs": [
+    {
+      "stat_hour": "2026-04-19 09:00:00",
+      "service_name": "auth-service",
+      "error_code": "E1001",
+      "error_rate": 0.06,
+      "error_count": 120,
+      "total_requests": 2000,
+      "p99_duration_ms": 800.0,
+      "unique_users": 40,
+      "sample_trace_ids": ["trace-auth-001", "trace-auth-002"],
+      "error_message": "Token verification failed (E1001): signature invalid",
+      "stack_trace": "AuthService.verifyToken(...) -> JWTVerifier.verify(...)",
+      "trace_id": "trace-auth-001",
+      "event_timestamp": "2026-04-19T09:20:00Z"
+    }
+  ],
+  "rag_docs": [
+    {
+      "doc_id": "kb-E1001-01",
+      "title": "E1001 认证失败排查指南",
+      "content": "E1001 表示 token 签名校验失败；可能是 JWT 密钥轮换未同步。联系 auth SRE 核对密钥。",
+      "doc_type": "incident_solution",
+      "relevance_score": 0.89,
+      "error_codes": ["E1001"]
+    }
+  ]
+}

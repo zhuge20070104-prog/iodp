@@ -22,6 +22,8 @@ kafka_topics = [
 # Observability
 alarm_email = "data-engineering-dev@company.com"
 
-# OpenSearch（dev 环境可选，留空则 indexer 模块创建但不连接）
-opensearch_endpoint       = ""
-opensearch_collection_arn = ""
+# S3 Vectors（dev 环境可选，留空则 indexer 模块创建但不连接真实 bucket）
+# 部署完 iodp-agent terraform 后，从其 outputs 复制对应值。
+vector_bucket_name = ""
+vector_bucket_arn  = ""
+vector_index_name  = "incident_solutions"

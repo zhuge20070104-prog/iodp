@@ -1,22 +1,24 @@
 # terraform/main.tf
 # IODP Agent 完整基础设施
 #
-# 架构：API Gateway HTTP API + Lambda (Container) + DynamoDB + OpenSearch Serverless
+# 架构：API Gateway HTTP API + Lambda (Container) + DynamoDB + S3 Vectors
 # 前端：S3 Static Hosting + CloudFront
 #
 # 最低成本方案：
 #   - API Gateway HTTP API: $1/百万请求（比 REST API 便宜 70%）
 #   - Lambda 按请求计费，无流量时零成本
 #   - DynamoDB PAY_PER_REQUEST
-#   - OpenSearch Serverless 按 OCU 计费（最低 2 OCU，这是主要成本项）
+#   - S3 Vectors 按 PUT/存储/查询计费，本量级月费 < $1（取代旧 OpenSearch Serverless 2 OCU 方案）
 #   - S3 + CloudFront 静态托管 ~$1/月
+#
+# 注意：S3 Vectors 资源（aws_s3vectors_vector_bucket / aws_s3vectors_index）需要 AWS provider >= 6.5。
 
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.5"
     }
   }
 }
@@ -69,42 +71,62 @@ resource "aws_ecr_repository" "agent" {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# OpenSearch Serverless（RAG 向量搜索）
+# S3 Vectors（RAG 向量搜索 — GA 2025-12，取代 OpenSearch Serverless）
 # ═══════════════════════════════════════════════════════════════
+#
+# 模型：1 个 vector bucket → N 个 index
+#   - incident_solutions  ：bigdata vector_indexer Lambda 增量写入历史故障摘要
+#   - product_docs        ：人工/离线脚本写入产品文档
+#
+# 元数据策略：
+#   filterable     ：error_codes, doc_type, source_env  （查询时可作为过滤条件）
+#   non-filterable ：title, content, resolution, ...    （仅 returnMetadata 时回传，更便宜）
 
-resource "aws_opensearchserverless_collection" "rag" {
-  name = "iodp-rag-${var.environment}"
-  type = "VECTORSEARCH"
+resource "aws_s3vectors_vector_bucket" "rag" {
+  vector_bucket_name = "iodp-rag-${var.environment}"
+  force_destroy      = true
 
   tags = local.tags
 }
 
-# OpenSearch Serverless 需要加密和网络策略才能创建 collection
-resource "aws_opensearchserverless_security_policy" "encryption" {
-  name = "${local.name_prefix}-enc"
-  type = "encryption"
-  policy = jsonencode({
-    Rules = [{
-      ResourceType = "collection"
-      Resource     = ["collection/iodp-rag-${var.environment}"]
-    }]
-    AWSOwnedKey = true
-  })
+resource "aws_s3vectors_index" "incident_solutions" {
+  vector_bucket_name = aws_s3vectors_vector_bucket.rag.vector_bucket_name
+  index_name         = "incident_solutions"
+  data_type          = "float32"
+  dimension          = 1024
+  distance_metric    = "cosine"
+
+  metadata_configuration {
+    non_filterable_metadata_keys = [
+      "title",
+      "content",
+      "resolution",
+      "affected_service",
+      "severity",
+      "resolved_at",
+      "incident_id",
+    ]
+  }
+
+  tags = local.tags
 }
 
-resource "aws_opensearchserverless_security_policy" "network" {
-  name = "${local.name_prefix}-net"
-  type = "network"
-  policy = jsonencode([{
-    Rules = [{
-      ResourceType = "collection"
-      Resource     = ["collection/iodp-rag-${var.environment}"]
-    }, {
-      ResourceType = "dashboard"
-      Resource     = ["collection/iodp-rag-${var.environment}"]
-    }]
-    AllowFromPublic = true
-  }])
+resource "aws_s3vectors_index" "product_docs" {
+  vector_bucket_name = aws_s3vectors_vector_bucket.rag.vector_bucket_name
+  index_name         = "product_docs"
+  data_type          = "float32"
+  dimension          = 1024
+  distance_metric    = "cosine"
+
+  metadata_configuration {
+    non_filterable_metadata_keys = [
+      "title",
+      "content",
+      "created_at",
+    ]
+  }
+
+  tags = local.tags
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -196,10 +218,19 @@ resource "aws_iam_role_policy" "lambda_app" {
         Resource = ["arn:aws:bedrock:${var.aws_region}::foundation-model/*"]
       },
       {
-        Sid      = "OpenSearchAccess"
-        Effect   = "Allow"
-        Action   = ["aoss:APIAccessAll"]
-        Resource = [aws_opensearchserverless_collection.rag.arn]
+        Sid    = "S3VectorsAccess"
+        Effect = "Allow"
+        Action = [
+          "s3vectors:QueryVectors",
+          "s3vectors:GetVectors",
+          "s3vectors:PutVectors",
+          "s3vectors:DeleteVectors",
+          "s3vectors:ListVectors",
+        ]
+        Resource = [
+          aws_s3vectors_vector_bucket.rag.arn,
+          "${aws_s3vectors_vector_bucket.rag.arn}/index/*",
+        ]
       },
     ]
   })
@@ -225,7 +256,7 @@ resource "aws_lambda_function" "agent" {
       IODP_AGENT_JOBS_TABLE     = module.dynamodb.agent_jobs_table_name
       IODP_BUG_TICKETS_TABLE    = module.dynamodb.tickets_table_name
       IODP_DQ_REPORTS_TABLE     = replace(element(split("/", var.bigdata_dq_reports_table_arn), length(split("/", var.bigdata_dq_reports_table_arn)) - 1), "iodp_", "iodp-")
-      IODP_OPENSEARCH_ENDPOINT  = aws_opensearchserverless_collection.rag.collection_endpoint
+      IODP_VECTOR_BUCKET_NAME   = aws_s3vectors_vector_bucket.rag.vector_bucket_name
       IODP_ATHENA_WORKGROUP     = var.athena_workgroup
       IODP_ATHENA_RESULT_BUCKET = var.athena_result_bucket
     }

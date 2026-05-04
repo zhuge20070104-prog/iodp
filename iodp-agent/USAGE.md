@@ -300,7 +300,7 @@ if request.user_id:
 | `IODP_AGENT_STATE_TABLE` | iodp-agent-state-prod | LangGraph Checkpointer 表 |
 | `IODP_AGENT_JOBS_TABLE` | iodp-agent-jobs-prod | 异步 Job 跟踪表 |
 | `IODP_DQ_REPORTS_TABLE` | iodp-dq-reports-prod | BigData DQ 报告表（跨项目读取） |
-| `IODP_OPENSEARCH_ENDPOINT` | （必填） | OpenSearch Serverless 端点 |
+| `IODP_VECTOR_BUCKET_NAME` | （必填） | S3 Vectors bucket 名称（terraform output `vector_bucket_name`） |
 | `IODP_BEDROCK_MODEL_ID` | anthropic.claude-3-5-sonnet-... | LLM 模型 |
 | `IODP_ATHENA_RESULT_BUCKET` | iodp-athena-results-prod | Athena 查询结果 S3 |
 | `IODP_ATHENA_MAX_ROWS` | 50 | Athena 结果截断行数 |
@@ -312,16 +312,16 @@ if request.user_id:
 ```bash
 IODP_AWS_REGION=ap-southeast-1
 IODP_ENVIRONMENT=dev
-IODP_OPENSEARCH_ENDPOINT=https://xxx.aoss.amazonaws.com
+IODP_VECTOR_BUCKET_NAME=iodp-rag-dev
 ```
 
 Lambda 部署时由 Terraform 通过 Lambda 环境变量注入，不需要 `.env` 文件。
 
 ---
 
-## OpenSearch RAG 知识库：两个索引
+## S3 Vectors RAG 知识库：两个索引
 
-RAG Agent 同时搜索两个 OpenSearch 索引，结果按相关度分数混排返回 top 5：
+RAG Agent 同时搜索同一个 vector bucket 下的两个 index，结果按相关度分数混排返回 top 5：
 
 ```python
 raw_hits = vector_search(
@@ -352,11 +352,11 @@ incident_solutions（自动）                product_docs（人工）
 ```
 gold_incident_summary.py 生成 incident record
     → Gold S3 parquet（stat_date 分区）
-    → S3 Event 自动触发 opensearch_indexer Lambda
-    → handler.py _build_os_document() 构造文档
+    → S3 Event 自动触发 vector_indexer Lambda
+    → handler.py _build_vector_record() 构造记录（key + float32 + metadata）
     → Bedrock Titan Embedding 生成 1024 维向量
-    → OpenSearch incident_solutions 索引
-    → RAG Agent vector_search() 检索
+    → S3 Vectors put_vectors → incident_solutions index
+    → RAG Agent vector_search() 检索 (query_vectors)
     → RAGDocument 各字段
 ```
 
@@ -374,14 +374,14 @@ gold_incident_summary.py 生成 incident record
   5 年：~12000 条（上限估算）
 ```
 
-全量重建索引耗时（瓶颈在 Bedrock Embedding API，~200ms/条）：
+全量重建索引耗时（瓶颈仍是 Bedrock Embedding API，~200ms/条）：
 
-| 数据量 | 索引时间 | OpenSearch 存储 |
+| 数据量 | 索引时间 | S3 Vectors 存储 |
 |--------|---------|----------------|
-| 3000 条（正常 5 年） | ~10 分钟 | < 100MB |
-| 12000 条（极端 5 年） | ~40 分钟 | < 500MB |
+| 3000 条（正常 5 年） | ~10 分钟 | ~12 MB（含 metadata） |
+| 12000 条（极端 5 年） | ~40 分钟 | ~50 MB |
 
-数据量很小，`make index-kb` 全量重建没有性能压力。日常增量由 bigdata 端的 `opensearch_indexer` Lambda 自动处理，每天只新增几条。
+数据量很小，`make index-kb` 全量重建没有性能压力。日常增量由 bigdata 端的 `vector_indexer` Lambda 自动处理，每天只新增几条。
 
 ### product_docs 的导入方式
 
@@ -389,20 +389,20 @@ gold_incident_summary.py 生成 incident record
 1. 人工编写产品文档（运维手册、FAQ、排查指南）
 2. 通过 `make index-kb` 调用 `scripts/index_knowledge_base.py` 离线导入
 
-**注意**：如果 `product_docs` 索引尚未创建，OpenSearch 会返回 `index_not_found_exception`。代码已做异常处理，搜索失败时 `retrieved_docs` 为空列表，不会中断流程，但 Agent 诊断结论会缺少文档参考。
+**注意**：S3 Vectors index 由 Terraform 创建，部署后即存在；空 index 查询返回 0 命中而非异常。代码层面单 index 失败也不会中断流程，仅日志告警。
 
 ### 搜索结果字段映射
 
 两个索引都有相同的字段结构，RAGDocument 不需要区分来源：
 
-| RAGDocument 字段 | OpenSearch 来源 | 说明 |
+| RAGDocument 字段 | S3 Vectors 来源 | 说明 |
 |---|---|---|
-| `doc_id` | `hit["_id"]` | 文档唯一 ID |
-| `title` | `hit["_source"]["title"]` | 文档标题 |
-| `content` | `hit["_source"]["content"]` | 文档正文 |
-| `doc_type` | `hit["_source"]["doc_type"]` | `"incident_solution"` 或 `"product_doc"`，用于区分来源 |
-| `relevance_score` | `hit["_score"]` | OpenSearch kNN 余弦相似度分数 |
-| `error_codes` | `hit["_source"]["error_codes"]` | 关联的错误码列表 |
+| `doc_id` | `vec["key"]` | 向量唯一 ID（incident_id 或文档 key） |
+| `title` | `vec["metadata"]["title"]` | 文档标题（non-filterable） |
+| `content` | `vec["metadata"]["content"]` | 文档正文（non-filterable） |
+| `doc_type` | `vec["metadata"]["doc_type"]` | `"incident_solution"` 或 `"product_doc"`，filterable |
+| `relevance_score` | `1 - vec["distance"]` | 由 cosine distance 转换得到（越大越相似） |
+| `error_codes` | `vec["metadata"]["error_codes"]` | 关联错误码列表，filterable（支持 `$in` 过滤） |
 
 ---
 
@@ -600,4 +600,4 @@ setMessages(prev => {
 | `make test-api` | 发送端到端测试请求 |
 | `make status` | 查看部署状态 |
 | `make seed-data` | 注入测试数据 |
-| `make index-kb` | 索引 RAG 知识库到 OpenSearch |
+| `make index-kb` | 索引 RAG 知识库到 S3 Vectors |

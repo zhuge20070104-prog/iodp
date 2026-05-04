@@ -1,0 +1,125 @@
+# iodp-bigdata DQ Regression Set
+#
+# 每个 case 定义了一批合成数据 + 应用于这批数据的一组 DQ 规则 + 期望产出。
+# 目标：Silver Parser / DataQualityChecker 一旦出现语义漂移（例如 UUID 校验放宽、
+# 阈值判定错位），本回归集必须能兜住。
+#
+# rules 语法简化版，runner 会映射到 glue_jobs.lib.data_quality 的规则工厂：
+#   - not_null:column          → rule_not_null(column)
+#   - in_set:column:v1,v2,v3   → rule_in_set(column, {v1, v2, v3})
+#   - valid_uuid:column        → rule_valid_uuid(column, nullable=True)
+#   - valid_uuid:column:nn     → rule_valid_uuid(column, nullable=False)
+#
+# expected:
+#   total_records             输入行数（与 fixture 实际行数一致，用于冗余校验）
+#   failed_records            违反任何规则的行数
+#   failure_rate_min/max      允许的浮动区间（[min, max]）
+#   error_type                dominant error_type（第一个触发的规则的 error_type）
+#   threshold_breached        是否超过阈值
+#   failure_threshold         传给 DataQualityChecker 的阈值
+
+cases:
+  - id: logs_all_clean
+    description: "全部合法，期望 0 失败、不触发阈值"
+    fixture: logs_clean.json
+    rules:
+      - "not_null:log_id"
+      - "in_set:log_level:ERROR,WARN,INFO,DEBUG"
+      - "in_set:error_code:E1001,E1002,E1003,E2001,E2002,E2003,E3001,E3002,E4001,E4002,E4003,"
+    failure_threshold: 0.05
+    expected:
+      total_records: 5
+      failed_records: 0
+      failure_rate_min: 0.0
+      failure_rate_max: 0.0
+      error_type: UNKNOWN
+      threshold_breached: false
+
+  - id: logs_null_log_id_breach
+    description: "log_id 大量为空，触发 NULL_LOG_ID 且超过阈值"
+    fixture: logs_null_log_id.json
+    rules:
+      - "not_null:log_id"
+      - "in_set:log_level:ERROR,WARN,INFO,DEBUG"
+    failure_threshold: 0.10
+    expected:
+      total_records: 10
+      failed_records: 4
+      failure_rate_min: 0.39
+      failure_rate_max: 0.41
+      error_type: NULL_LOG_ID
+      threshold_breached: true
+
+  - id: logs_invalid_level_below_threshold
+    description: "极少数 log_level 不合法，但未超阈值"
+    fixture: logs_invalid_level.json
+    rules:
+      - "not_null:log_id"
+      - "in_set:log_level:ERROR,WARN,INFO,DEBUG"
+    failure_threshold: 0.10
+    expected:
+      total_records: 20
+      failed_records: 1
+      failure_rate_min: 0.04
+      failure_rate_max: 0.06
+      error_type: INVALID_LOG_LEVEL
+      threshold_breached: false
+
+  - id: logs_invalid_error_code_breach
+    description: "大部分 error_code 不在字典内，触发 INVALID_ERROR_CODE 阈值"
+    fixture: logs_invalid_error_code.json
+    rules:
+      - "not_null:log_id"
+      - "in_set:error_code:E1001,E2001,E3001,"
+    failure_threshold: 0.10
+    expected:
+      total_records: 10
+      failed_records: 6
+      failure_rate_min: 0.59
+      failure_rate_max: 0.61
+      error_type: INVALID_ERROR_CODE
+      threshold_breached: true
+
+  - id: clickstream_uuid_nullable_ok
+    description: "click_id 为合法 UUID v4 或 NULL，全部通过"
+    fixture: clicks_uuid_ok.json
+    rules:
+      - "valid_uuid:click_id"
+    failure_threshold: 0.01
+    expected:
+      total_records: 6
+      failed_records: 0
+      failure_rate_min: 0.0
+      failure_rate_max: 0.0
+      error_type: UNKNOWN
+      threshold_breached: false
+
+  - id: clickstream_uuid_invalid_breach
+    description: "click_id 非法 UUID 过多，即便 nullable=True 也应被抓出"
+    fixture: clicks_uuid_bad.json
+    rules:
+      - "valid_uuid:click_id"
+    failure_threshold: 0.05
+    expected:
+      total_records: 10
+      failed_records: 4
+      failure_rate_min: 0.39
+      failure_rate_max: 0.41
+      error_type: INVALID_UUID_CLICK_ID
+      threshold_breached: true
+
+  - id: logs_multi_rule_interaction
+    description: "同一行同时违反两条规则，统计为 1 条失败（不重复计数）"
+    fixture: logs_multi_rule.json
+    rules:
+      - "not_null:log_id"
+      - "in_set:log_level:ERROR,WARN,INFO,DEBUG"
+    failure_threshold: 0.10
+    expected:
+      total_records: 10
+      failed_records: 2
+      failure_rate_min: 0.19
+      failure_rate_max: 0.21
+      # 第一个被触发的规则 = not_null → NULL_LOG_ID
+      error_type: NULL_LOG_ID
+      threshold_breached: true

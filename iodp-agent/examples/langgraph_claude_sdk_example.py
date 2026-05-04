@@ -230,7 +230,7 @@ def rag_node(state: AgentState) -> dict:
 
     rag_query = call_claude(system, user_content, max_tokens=256)
 
-    # 模拟 OpenSearch 检索结果（实际项目中调用 opensearch_tool.vector_search）
+    # 模拟 S3 Vectors 检索结果（实际项目中调用 s3_vectors_tool.vector_search）
     mock_docs = [
         {
             "doc_id": "INC-2026-04-01-payment-E2001",

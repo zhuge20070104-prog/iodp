@@ -8,7 +8,6 @@
 """
 
 from functools import lru_cache
-from typing import Optional
 
 from pydantic_settings import BaseSettings
 
@@ -29,8 +28,9 @@ class Settings(BaseSettings):
     bug_tickets_table: str = "iodp-bug-tickets-prod"  # Bug 报告工单归档表
     dq_reports_table: str = "iodp-dq-reports-prod"
 
-    # OpenSearch
-    opensearch_endpoint: str = ""
+    # S3 Vectors (replaces OpenSearch Serverless; GA 2025-12)
+    # 单个 vector bucket 下挂多个 index：incident_solutions / product_docs
+    vector_bucket_name: str = ""
 
     # Bedrock
     bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"

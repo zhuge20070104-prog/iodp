@@ -1,0 +1,29 @@
+{
+  "error_logs": [
+    {
+      "stat_hour": "2026-04-19 08:00:00",
+      "service_name": "auth-service",
+      "error_code": "E1001",
+      "error_rate": 0.09,
+      "error_count": 180,
+      "total_requests": 2000,
+      "p99_duration_ms": 1200.0,
+      "unique_users": 55,
+      "sample_trace_ids": ["trace-mis-001", "trace-mis-002"],
+      "error_message": "Token verification backend unreachable (E1001)",
+      "stack_trace": "AuthService.verifyToken(...) -> JWTVerifier.verify(...) -> ConnectException: backend.auth.internal",
+      "trace_id": "trace-mis-001",
+      "event_timestamp": "2026-04-19T08:40:00Z"
+    }
+  ],
+  "rag_docs": [
+    {
+      "doc_id": "kb-E1001-02",
+      "title": "E1001 认证后端不可达",
+      "content": "E1001 + backend unreachable 通常是认证后端宕机，和网络抖动无关；优先检查 backend.auth.internal 服务健康。",
+      "doc_type": "incident_solution",
+      "relevance_score": 0.92,
+      "error_codes": ["E1001"]
+    }
+  ]
+}

@@ -69,18 +69,26 @@ variable "alarm_email" {
   type        = string
 }
 
-# ─── OpenSearch (for opensearch_indexer module) ───
+# ─── S3 Vectors (for vector_indexer module) ───
+# 物理资源（vector bucket + indexes）由 iodp-agent 项目的 Terraform 创建并输出，
+# 这里通过 tfvars 接收名称/ARN 引用。
 
-variable "opensearch_endpoint" {
-  description = "OpenSearch Serverless collection endpoint URL"
+variable "vector_bucket_name" {
+  description = "S3 Vectors bucket name (created by iodp-agent terraform)"
   type        = string
   default     = ""
 }
 
-variable "opensearch_collection_arn" {
-  description = "OpenSearch Serverless collection ARN"
+variable "vector_bucket_arn" {
+  description = "S3 Vectors bucket ARN (created by iodp-agent terraform)"
   type        = string
   default     = ""
+}
+
+variable "vector_index_name" {
+  description = "S3 Vectors index name written by the indexer Lambda"
+  type        = string
+  default     = "incident_solutions"
 }
 
 # ─── Deployment orchestration ───

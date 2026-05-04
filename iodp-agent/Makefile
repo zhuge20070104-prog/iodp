@@ -101,7 +101,7 @@ init: check-aws
 	@echo "📤 步骤 4/7: 推送镜像到 ECR..."
 	@$(MAKE) push-image
 	@echo ""
-	@echo "🏗️  步骤 5/7: 部署完整基础设施 (DynamoDB + OpenSearch + Lambda + API Gateway)..."
+	@echo "🏗️  步骤 5/7: 部署完整基础设施 (DynamoDB + S3 Vectors + Lambda + API Gateway)..."
 	cd $(TF_DIR) && terraform apply \
 		$(TF_VARS) \
 		-var='lambda_image_uri=$(IMAGE_URI)' \
@@ -111,7 +111,7 @@ init: check-aws
 	@echo "📊 步骤 6/7: 注入 Demo 测试数据 (Athena + DynamoDB)..."
 	@$(MAKE) seed-data
 	@echo ""
-	@echo "📚 步骤 7/7: 索引 RAG 知识库 (OpenSearch)..."
+	@echo "📚 步骤 7/7: 索引 RAG 知识库 (S3 Vectors)..."
 	@$(MAKE) index-kb
 	@echo ""
 	@echo "=========================================="
@@ -134,15 +134,15 @@ seed-data: check-aws
 	@echo "✅ 测试数据注入完成"
 
 # ──────────────────────────────────────────────────────────────
-# 索引 RAG 知识库到 OpenSearch
+# 索引 RAG 知识库到 S3 Vectors
 # ──────────────────────────────────────────────────────────────
 index-kb: check-aws
-	@echo "📚 索引 RAG 知识库到 OpenSearch..."
-	$(eval OS_ENDPOINT := $(shell cd $(TF_DIR) && terraform output -raw opensearch_endpoint 2>/dev/null))
+	@echo "📚 索引 RAG 知识库到 S3 Vectors..."
+	$(eval VECTOR_BUCKET := $(shell cd $(TF_DIR) && terraform output -raw vector_bucket_name 2>/dev/null))
 	cd scripts && python3 index_knowledge_base.py \
 		--region $(AWS_REGION) \
 		--env $(ENV) \
-		--opensearch-endpoint $(OS_ENDPOINT)
+		--vector-bucket $(VECTOR_BUCKET)
 	@echo "✅ 知识库索引完成"
 
 # ──────────────────────────────────────────────────────────────
@@ -220,10 +220,10 @@ status: check-aws
 		--query 'Configuration.{State:State,Runtime:Runtime,Memory:MemorySize,Timeout:Timeout,LastModified:LastModified}' \
 		--output table 2>/dev/null || echo "(Lambda 未部署)"
 	@echo ""
-	@echo "--- OpenSearch Collection ---"
-	@aws opensearchserverless list-collections \
-		--query "collectionSummaries[?name=='iodp-rag-$(ENV)']" \
-		--region $(AWS_REGION) --output table 2>/dev/null || echo "(OpenSearch 未部署)"
+	@echo "--- S3 Vectors Bucket ---"
+	@aws s3vectors list-vector-buckets \
+		--query "vectorBuckets[?vectorBucketName=='iodp-rag-$(ENV)']" \
+		--region $(AWS_REGION) --output table 2>/dev/null || echo "(S3 Vectors 未部署)"
 
 # ──────────────────────────────────────────────────────────────
 # 销毁所有资源（省钱！）
@@ -234,12 +234,12 @@ destroy: check-aws
 	@echo ""
 	@echo "⚠️  即将销毁 Agent $(ENV) 环境的所有资源:"
 	@echo "   - API Gateway + Lambda"
-	@echo "   - OpenSearch Serverless Collection（停止 OCU 计费）"
+	@echo "   - S3 Vectors Bucket + Indexes（force_destroy=true，向量数据全部丢弃）"
 	@echo "   - DynamoDB 表（Agent State + Tickets）"
 	@echo "   - ECR 仓库 + 镜像"
 	@echo "   - IAM Role + Policy"
 	@echo ""
-	@echo "⏱️  OpenSearch Serverless 每小时烧 SGD 0.73，确认要销毁？"
+	@echo "💡 S3 Vectors 按使用量计费，闲置成本极低（远低于旧 OpenSearch Serverless 方案）"
 	@echo "按 Enter 继续, 或 Ctrl+C 取消"
 	@read -p ""
 	@$(MAKE) do-destroy
@@ -284,7 +284,7 @@ help:
 	@echo "数据命令:"
 	@echo ""
 	@echo "  make seed-data         注入 Demo 测试数据到 Athena/DynamoDB"
-	@echo "  make index-kb          索引 RAG 知识库到 OpenSearch"
+	@echo "  make index-kb          索引 RAG 知识库到 S3 Vectors"
 	@echo ""
 	@echo "调试命令:"
 	@echo ""
@@ -313,4 +313,4 @@ help:
 	@echo "  # 指定环境"
 	@echo "  make init ENV=staging"
 	@echo ""
-	@echo "💰 成本提醒: OpenSearch Serverless 最低 ~SGD 0.73/小时，测完记得 make destroy"
+	@echo "💰 成本提醒: 主要成本是 Lambda 调用 + Bedrock 推理，闲置时近零；S3 Vectors 按存储/查询计费极低"
