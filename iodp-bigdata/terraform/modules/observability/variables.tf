@@ -3,9 +3,14 @@ variable "environment" {
   type        = string
 }
 
-variable "msk_cluster_name" {
-  description = "MSK cluster name for CloudWatch alarm dimensions"
+variable "aws_region" {
+  description = "AWS region — required by CloudWatch dashboard widgets"
   type        = string
+}
+
+variable "firehose_stream_names" {
+  description = "Firehose delivery stream names to monitor (replaces MSK consumer-lag alarms)"
+  type        = list(string)
 }
 
 variable "glue_job_names" {

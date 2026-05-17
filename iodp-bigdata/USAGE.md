@@ -1,47 +1,52 @@
 # IODP BigData 使用规范
 
-## 部署顺序：为什么必须三步 bootstrap
+## 部署顺序：两步 bootstrap
 
 Glue Database 只能由 Terraform 建（`aws_glue_catalog_database`），而 Iceberg Table 只能由 Athena DDL 建（`CREATE TABLE ... TBLPROPERTIES ('table_type' = 'ICEBERG')`）。Terraform Provider 对 Iceberg `TBLPROPERTIES` 支持有限，强行在 `aws_glue_catalog_table` 里写出来很啰嗦且容易漂移，所以本项目把"建表"这一步交给 Athena DDL。
 
 由此引出一个严格的线性依赖：
 
 ```
-[1] Terraform apply              [2] Athena DDL                [3] Glue Triggers
-    创建 Database          →         创建 Iceberg Table    →         开始 cron 触发
-    (iodp_silver_dev)              (silver.parsed_logs)           Glue Job 正常写表
+[1] Terraform apply              [2] Athena DDL
+    创建 Database          →         创建 Iceberg Table（Silver/Gold）
+    + Firehose + Glue Jobs           Glue Batch Job 运行时即能写入
+    (iodp_silver_dev …)             (silver.parsed_logs …)
 ```
+
+**Triggers 默认不开（方案 D FinOps 优化）**：`triggers_enabled` 默认 `false`，Glue Batch 改为**手动触发**（演示模式），避免空闲也按小时烧 DPU（一周省 ~$35）。需要 24×7 自动跑时再 `make enable-triggers` 切回 cron 模式。
 
 如果顺序错乱：
 
 | 错误场景 | 后果 |
 |---------|------|
 | 先跑 DDL，后跑 Terraform | Athena 报 `Database does not exist` ❌ |
-| Terraform 启用 Triggers 后才跑 DDL | Cron 触发的 Glue Job 报 `TableNotFoundException` ❌ |
+| Triggers 启用后才跑 DDL | Cron 触发的 Glue Job 报 `TableNotFoundException` ❌ |
 
-### Makefile 三段式部署
-
-```bash
-make init   # = deploy-infra + deploy-ddl + enable-triggers（一键完成）
-```
-
-或手动分步执行（排障时更清楚是哪一步失败）：
+### Makefile 两段式部署
 
 ```bash
-make deploy-infra      # [1/3] terraform apply -var='triggers_enabled=false'
-make deploy-ddl        # [2/3] bash scripts/apply_ddl.sh ENV ACCOUNT_ID REGION
-make enable-triggers   # [3/3] terraform apply -var='triggers_enabled=true'
+make init   # = deploy-infra + deploy-ddl（一键，Triggers 默认 OFF）
 ```
+
+或手动分步执行：
+
+```bash
+make deploy-infra      # [1/2] terraform apply -var='triggers_enabled=false'
+make deploy-ddl        # [2/2] bash scripts/apply_ddl.sh ENV ACCOUNT_ID REGION
+```
+
+### Trigger 模式切换 + 演示触发
+
+| 命令 | 作用 | 适用场景 |
+|---|---|---|
+| `make enable-triggers`  | `triggers_enabled=true`，cron 自动触发 | 真生产环境，~$35/周 |
+| `make disable-triggers` | `triggers_enabled=false`，关闭所有 cron | 默认（FinOps） |
+| `make demo-pipeline`    | 手动触发 Silver → 等 5 min → 触发 Gold | 演示时一键跑完整流水线 |
+| `make produce-sample`   | 向 Firehose 推 1000 条点击流 + app_logs | 演示数据入口 |
 
 ### triggers_enabled 变量
 
-`terraform/variables.tf` 中的 `triggers_enabled`（默认 `true`）控制三个 `aws_glue_trigger` 资源的 `enabled` 属性：
-
-- **首次部署**：`make deploy-infra` 强制传 `-var='triggers_enabled=false'`，Triggers 创建但不激活，避免 cron 在 DDL 之前触发 Glue Job。
-- **启用阶段**：`make enable-triggers` 传 `-var='triggers_enabled=true'`，Triggers 切换到 active 状态。
-- **日常 `make deploy`**：不传 var，走变量默认值 `true`，Triggers 保持启用。
-
-这样 Terraform state 和 AWS 实际状态始终一致，不需要额外的 `aws glue start-trigger` / `stop-trigger` CLI 操作，也不会出现 drift。
+`terraform/variables.tf` 中的 `triggers_enabled`（默认 `false`）控制三个 `aws_glue_trigger` 资源的 `enabled` 属性。变量化让 Terraform state 和 AWS 实际状态保持一致，不需要额外的 `aws glue start-trigger` / `stop-trigger` CLI，也不会出现 drift。
 
 ---
 
@@ -170,14 +175,14 @@ WHERE stat_hour >= TIMESTAMP '2026-04-14 14:00:00'
 ### 写入方（iodp-bigdata）
 
 ```
-stream_app_logs.py / stream_clickstream.py
+silver_parse_logs.py / silver_enrich_clicks.py
     → DataQualityChecker.run()          # glue_jobs/lib/data_quality.py:160
         → _write_dq_report()            # glue_jobs/lib/data_quality.py:239
             → DynamoDB put_item
               → iodp-dq-reports-{env}
 ```
 
-每次 Streaming Job 做完 DQ 校验，都会往这张表写一条报告，包含：失败率、是否超阈值、死信路径、错误类型。
+每次 Silver Batch Job 做完 DQ 校验（DQ 已从原 Glue Streaming 迁移至 Silver 层），都会往这张表写一条报告：失败率、是否超阈值、死信路径、错误类型。
 
 ### 读取方（iodp-agent）
 
@@ -411,7 +416,7 @@ module "storage" {
 
 | 参数 | 用途 | 命名示例 |
 |------|------|---------|
-| `bronze_bucket_name` | **Bronze 层**（原始数据）：从 MSK 消费的 raw JSON 直接落到这里 | `iodp-bronze-dev-123456789012` |
+| `bronze_bucket_name` | **Bronze 层**（原始数据）：Firehose 直接落 GZip NDJSON 到 `<stream>/year=.../hour=HH/` | `iodp-bronze-dev-123456789012` |
 | `silver_bucket_name` | **Silver 层**（清洗数据）：经过 DQ 校验、解析、enrichment 后的数据 | `iodp-silver-dev-123456789012` |
 | `gold_bucket_name` | **Gold 层**（聚合数据）：面向业务的汇总表（如 `gold_api_error_stats`、`gold_hourly_active_users`） | `iodp-gold-dev-123456789012` |
 | `scripts_bucket_name` | **Glue 脚本桶**：存放所有 Glue Job 的 Python 脚本和 `lib.zip`，Glue 运行时从这里拉取代码 | `iodp-glue-scripts-dev-123456789012` |
@@ -438,29 +443,58 @@ module "storage" {
 
 ---
 
-## Glue Streaming Job 参数传递链路
+## 入口 + Glue Batch Job 参数传递链路
 
-以 `stream_app_logs.py` 为例，Python 代码中通过 `getResolvedOptions` 获取的参数：
+方案 D 下数据从 Firehose 直接落 Bronze，不再有常驻 Glue Streaming Job。Silver/Gold 全部是 Glue **Batch** Job，按需手动触发。
+
+### 数据入口（Producer → Firehose → Bronze）
+
+```
+Producer (boto3 put_record_batch)         无需 SDK 认证握手，纯 IAM SigV4 HTTPS
+    │
+    ▼
+Kinesis Data Firehose (Direct PUT)        $0.029/GB
+  iodp-clickstream-{env}                  buffer: 5 MB or 60s
+  iodp-app_logs-{env}                     compression: GZIP
+    │
+    ▼
+s3://<bronze>/<stream>/year=YYYY/month=MM/day=DD/hour=HH/*.gz
+  (NDJSON, Firehose dynamic partitioning)
+```
+
+参考 `scripts/produce_sample_events.py` 用 boto3 调 `firehose.put_record_batch()` —— 完全不需要 Kafka client SDK、broker bootstrap、SASL/IAM handshake。
+
+### Silver Batch Job 参数传递（以 silver_parse_logs.py 为例）
+
+Python 代码中通过 `getResolvedOptions` 获取参数：
 
 ```python
 args = getResolvedOptions(sys.argv, [
     "JOB_NAME",
-    "MSK_BOOTSTRAP_SERVERS",
-    "BRONZE_BUCKET",
-    "DQ_TABLE",
+    "BRONZE_BUCKET",        # 形如 s3://iodp-bronze-dev-XXX/
+    "BRONZE_PREFIX",        # 形如 app_logs/ 或 clickstream/
+    "SILVER_BUCKET",
+    "GLUE_DATABASE_BRONZE",
+    "GLUE_DATABASE_SILVER",
     "LINEAGE_TABLE",
+    "DQ_TABLE",
+    "DQ_THRESHOLD_TABLE",
     "ENVIRONMENT",
 ])
 ```
 
-这些参数在 `terraform/modules/compute/main.tf` 的 `aws_glue_job.stream_app_logs` 资源中通过 `default_arguments` 传入：
+这些参数在 `terraform/modules/compute/main.tf` 的 `aws_glue_job.silver_parse_logs` 中通过 `default_arguments` 传入：
 
 ```hcl
 default_arguments = {
-  "--MSK_BOOTSTRAP_SERVERS" = var.msk_bootstrap_brokers
   "--BRONZE_BUCKET"         = "s3://${var.bronze_bucket_name}/"
-  "--DQ_TABLE"              = var.dq_reports_table_name
+  "--BRONZE_PREFIX"         = "app_logs/"
+  "--SILVER_BUCKET"         = "s3://${var.silver_bucket_name}/"
+  "--GLUE_DATABASE_BRONZE"  = aws_glue_catalog_database.bronze.name
+  "--GLUE_DATABASE_SILVER"  = aws_glue_catalog_database.silver.name
   "--LINEAGE_TABLE"         = var.lineage_table_name
+  "--DQ_TABLE"              = var.dq_reports_table_name
+  "--DQ_THRESHOLD_TABLE"    = var.dq_threshold_config_table_name
   "--ENVIRONMENT"           = var.environment
 }
 ```
@@ -473,15 +507,16 @@ terraform/environments/dev.tfvars  或  prod.tfvars
     ▼
 terraform/main.tf  (根模块)
     │
-    ├── module "storage"    → bronze_bucket_name
-    ├── module "streaming"  → bootstrap_brokers_sasl_iam
-    └── module "dynamodb"   → dq_reports_table_name, lineage_events_table_name
+    ├── module "storage"     → bronze_bucket_name / silver_bucket_name
+    ├── module "ingestion"   → Firehose delivery streams（数据入口）
+    └── module "dynamodb"    → dq_reports_table_name, lineage_events_table_name,
+                                dq_threshold_config_table_name
             │
             ▼  (通过 module output 传递)
     module "compute"
         │
         ▼
-    aws_glue_job.stream_app_logs  →  default_arguments
+    aws_glue_job.silver_parse_logs  →  default_arguments
         │
         ▼  (Glue 运行时注入 --key=value)
     Python getResolvedOptions()  →  args["KEY"]
@@ -491,11 +526,14 @@ terraform/main.tf  (根模块)
 
 | Python 参数 | Terraform `default_arguments` key | 值来源 |
 |---|---|---|
-| `JOB_NAME` | Glue 自动注入（无需显式声明） | 资源 `name = "iodp-stream-app-logs-${var.environment}"` |
-| `MSK_BOOTSTRAP_SERVERS` | `--MSK_BOOTSTRAP_SERVERS` | `module.streaming.bootstrap_brokers_sasl_iam` → MSK Serverless 集群 |
-| `BRONZE_BUCKET` | `--BRONZE_BUCKET` | `module.storage.bronze_bucket_name` → S3 bucket |
-| `DQ_TABLE` | `--DQ_TABLE` | `module.dynamodb.dq_reports_table_name` → DynamoDB 表 |
-| `LINEAGE_TABLE` | `--LINEAGE_TABLE` | `module.dynamodb.lineage_events_table_name` → DynamoDB 表 |
-| `ENVIRONMENT` | `--ENVIRONMENT` | 根模块 `var.environment`（在 `environments/dev.tfvars` / `prod.tfvars` 中设置） |
+| `JOB_NAME` | Glue 自动注入（无需显式声明） | 资源 `name = "iodp-silver-parse-logs-${var.environment}"` |
+| `BRONZE_BUCKET` | `--BRONZE_BUCKET` | `module.storage.bronze_bucket_name` |
+| `BRONZE_PREFIX` | `--BRONZE_PREFIX` | 在 compute 模块里写死，与 Firehose stream 同名（如 `app_logs/`） |
+| `SILVER_BUCKET` | `--SILVER_BUCKET` | `module.storage.silver_bucket_name` |
+| `GLUE_DATABASE_BRONZE` / `_SILVER` | `--GLUE_DATABASE_*` | `aws_glue_catalog_database.*.name`（compute 模块自建） |
+| `DQ_TABLE` | `--DQ_TABLE` | `module.dynamodb.dq_reports_table_name` |
+| `DQ_THRESHOLD_TABLE` | `--DQ_THRESHOLD_TABLE` | `module.dynamodb.dq_threshold_config_table_name` |
+| `LINEAGE_TABLE` | `--LINEAGE_TABLE` | `module.dynamodb.lineage_events_table_name` |
+| `ENVIRONMENT` | `--ENVIRONMENT` | 根模块 `var.environment` |
 
-`JOB_NAME` 比较特殊：Glue 服务会自动将资源的 `name` 作为 `--JOB_NAME` 注入，不需要在 `default_arguments` 中显式声明。
+Silver Job 用 `BRONZE_BUCKET + BRONZE_PREFIX + year/month/day/hour` 拼出"上一小时分区"路径，`spark.read.json()` 直接读 Firehose 落地的 GZip NDJSON 文件。

@@ -172,11 +172,25 @@ async def run_graph_job(job_id: str, thread_id: str, request: DiagnoseRequest) -
         config = {"configurable": {"thread_id": thread_id}}
         final_state = await graph.ainvoke(initial_state, config=config)
 
-        # 序列化最终状态（只取对前端有意义的字段）
+        # 序列化最终状态（只取对前端有意义的字段）。
+        # user_reply 优先级：synthesizer 最终回复 > router 追问 > 兜底
+        # 当 router 判定 tech_issue 但无 user_id 时直接 END（无 synthesizer），
+        # 用 router 的 clarification_question 给用户追问 user_id；否则给个友好兜底。
+        router_state      = final_state.get("router") or {}
+        synthesizer_state = final_state.get("synthesizer") or {}
+        intent            = router_state.get("intent")
+
+        user_reply = (
+            synthesizer_state.get("user_reply")
+            or router_state.get("clarification_question")
+            or ("已收到您的反馈，正在处理。" if intent != "tech_issue"
+                else "为了帮您查询故障，请告诉我您的用户 ID。")
+        )
+
         result = {
-            "user_reply":  (final_state.get("synthesizer") or {}).get("user_reply"),
-            "bug_report":  (final_state.get("synthesizer") or {}).get("bug_report"),
-            "intent":      (final_state.get("router") or {}).get("intent"),
+            "user_reply":  user_reply,
+            "bug_report":  synthesizer_state.get("bug_report"),
+            "intent":      intent,
             "thread_id":   thread_id,
         }
 

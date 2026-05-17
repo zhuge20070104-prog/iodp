@@ -17,26 +17,32 @@ from typing import Any, Dict, List
 import awswrangler as wr
 import boto3
 
+import os
+from openai import OpenAI
+
 GOLD_TABLE       = "incident_summary"
-DEFAULT_INDEX    = "incident_solutions"
-EMBED_MODEL_ID   = "amazon.titan-embed-text-v2:0"
-EMBED_DIMENSION  = 1024
+DEFAULT_INDEX    = "incident-solutions"
+# embedding 用 OpenAI 兼容 endpoint (默认通义千问 text-embedding-v3, 1024 维)
+# AWS Bedrock 被 allowlist 拒了，所以 Bedrock 路线行不通。
+EMBED_BASE_URL   = os.environ.get("IODP_EMBEDDING_BASE_URL") or os.environ.get("IODP_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+EMBED_API_KEY    = os.environ.get("IODP_EMBEDDING_API_KEY") or os.environ.get("IODP_LLM_API_KEY", "")
+EMBED_MODEL_ID   = os.environ.get("IODP_EMBEDDING_MODEL", "text-embedding-v3")
+EMBED_DIMENSION  = int(os.environ.get("IODP_EMBEDDING_DIMENSIONS", "1024"))
 PUT_BATCH_SIZE   = 50  # S3 Vectors put_vectors 单次最多 500 条
 
 
-def embed(bedrock_client, text: str) -> List[float]:
-    """调用 Bedrock Titan Embeddings V2 生成向量"""
-    resp = bedrock_client.invoke_model(
-        modelId=EMBED_MODEL_ID,
-        body=json.dumps({
-            "inputText": text[:8000],
-            "dimensions": EMBED_DIMENSION,
-            "normalize": True,
-        }),
-        contentType="application/json",
-        accept="application/json",
+def embed(_client_unused, text: str) -> List[float]:
+    """通过 OpenAI 兼容 endpoint 生成文档向量。
+
+    保留第一个参数（旧 bedrock_client）只为向后兼容调用方签名，实际不使用。
+    """
+    client = OpenAI(api_key=EMBED_API_KEY, base_url=EMBED_BASE_URL)
+    resp = client.embeddings.create(
+        model=EMBED_MODEL_ID,
+        input=text[:2048],
+        dimensions=EMBED_DIMENSION,
     )
-    return json.loads(resp["body"].read())["embedding"]
+    return resp.data[0].embedding
 
 
 def build_record(row, vector: List[float]) -> Dict[str, Any]:

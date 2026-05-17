@@ -6,12 +6,17 @@
 #   - 支持 dry_run 模式，不写入数据只统计文件数
 #   - EventBridge 规则默认 DISABLED，运维人员在重处理前手动 enable
 #
-# 构建步骤（Lambda ZIP 需手动构建）:
-#   cd lambda/dlq_replay && zip -r ../dlq_replay.zip handler.py
+# Lambda ZIP 由 terraform 用 archive_file data source 自动打包
+# handler.py 无外部依赖（只用 boto3，Lambda runtime 自带）
 
 locals {
   function_name = "iodp-dlq-replay-${var.environment}"
-  zip_path      = "${path.module}/../../../lambda/dlq_replay.zip"
+}
+
+data "archive_file" "dlq_replay" {
+  type        = "zip"
+  source_file = "${path.module}/../../../lambda/dlq_replay/handler.py"
+  output_path = "${path.module}/../../../lambda/dlq_replay.zip"
 }
 
 # ─── IAM Role ───
@@ -73,8 +78,8 @@ resource "aws_lambda_function" "dlq_replay" {
   timeout       = 300   # 5 minutes — replay may need to copy many files
   memory_size   = 512
 
-  filename         = local.zip_path
-  source_code_hash = fileexists(local.zip_path) ? filebase64sha256(local.zip_path) : null
+  filename         = data.archive_file.dlq_replay.output_path
+  source_code_hash = data.archive_file.dlq_replay.output_base64sha256
 
   environment {
     variables = {
@@ -85,7 +90,9 @@ resource "aws_lambda_function" "dlq_replay" {
     }
   }
 
-  reserved_concurrent_executions = 1  # 防止并发重放导致数据重复
+  # 不设 reserved_concurrent_executions：新 AWS 账户的 Lambda unreserved 配额默认只有 10，
+  # 任何 reserved 占用都会让剩余配额低于 AWS 的最低 10 限制。
+  # 并发去重通过 EventBridge 默认 DISABLED + 手动单次触发实现，不依赖 reserved concurrency。
 
   tags = var.tags
 }

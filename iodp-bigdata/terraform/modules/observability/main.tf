@@ -1,11 +1,16 @@
 # terraform/modules/observability/main.tf
 # CloudWatch Dashboards、Alarms、SNS
 #
+# 方案 D 调整：
+#   - 删 MSK Consumer Lag 告警（MSK 已被 Firehose 替代）
+#   - 加 Firehose DeliveryToS3 失败告警（取代 MSK Lag）
+#   - 保留 Glue Job 失败告警 + DQ 阈值告警 + Dashboard
+#
 # 设计：
 #   - SNS Topic 统一收发告警邮件
-#   - MSK Consumer Lag 告警：积压超 5 分钟触发
+#   - Firehose DeliveryToS3.Records 异常 → 告警
 #   - Glue Job 失败告警：任意 Task 失败即触发
-#   - CloudWatch Dashboard：MSK Lag + Glue Duration 一览
+#   - CloudWatch Dashboard：Firehose 吞吐 + Glue Duration 一览
 
 # ─── SNS Topic（告警通知）───
 resource "aws_sns_topic" "alerts" {
@@ -19,23 +24,22 @@ resource "aws_sns_topic_subscription" "email" {
   endpoint  = var.alarm_email
 }
 
-# ─── MSK Consumer Lag 告警 ───
-resource "aws_cloudwatch_metric_alarm" "msk_consumer_lag" {
-  for_each = toset(["user_clickstream", "system_app_logs"])
+# ─── Firehose 投递失败告警（取代 MSK Consumer Lag）───
+resource "aws_cloudwatch_metric_alarm" "firehose_delivery_failure" {
+  for_each = toset(var.firehose_stream_names)
 
-  alarm_name          = "iodp-msk-${each.key}-lag-${var.environment}"
-  alarm_description   = "MSK consumer lag for ${each.key} exceeds threshold"
+  alarm_name          = "iodp-firehose-${each.key}-delivery-failure-${var.environment}"
+  alarm_description   = "Firehose ${each.key} S3 delivery failure detected"
   comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "EstimatedMaxTimeLag"
-  namespace           = "AWS/Kafka"
-  period              = 300   # 5 分钟
+  evaluation_periods  = 2
+  metric_name         = "DeliveryToS3.DataFreshness"
+  namespace           = "AWS/Firehose"
+  period              = 300
   statistic           = "Maximum"
-  threshold           = 300   # 超过 5 分钟积压则告警
+  threshold           = 900   # 15 min — 投递延迟超 15 min 视为异常
 
   dimensions = {
-    Cluster = var.msk_cluster_name
-    Topic   = each.key
+    DeliveryStreamName = each.key
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
@@ -66,7 +70,7 @@ resource "aws_cloudwatch_metric_alarm" "glue_job_failure" {
   tags          = var.tags
 }
 
-# ─── DQ 阈值突破告警（DynamoDB Stream → CloudWatch Custom Metric 的补充）───
+# ─── DQ 阈值突破告警 ───
 resource "aws_cloudwatch_metric_alarm" "dq_threshold_breach" {
   alarm_name          = "iodp-dq-threshold-breach-${var.environment}"
   alarm_description   = "DQ failure threshold breached - check DynamoDB dq_reports table"
@@ -95,15 +99,17 @@ resource "aws_cloudwatch_dashboard" "iodp" {
         width  = 12
         height = 6
         properties = {
-          title = "MSK Consumer Lag"
+          title = "Firehose Ingestion (Records/min)"
           metrics = [
-            for topic in ["user_clickstream", "system_app_logs"] : [
-              "AWS/Kafka", "EstimatedMaxTimeLag",
-              "Cluster", var.msk_cluster_name, "Topic", topic
+            for stream in var.firehose_stream_names : [
+              "AWS/Firehose", "IncomingRecords",
+              "DeliveryStreamName", stream
             ]
           ]
-          period = 300
+          period = 60
+          stat   = "Sum"
           view   = "timeSeries"
+          region = var.aws_region
         }
       },
       {
@@ -121,6 +127,7 @@ resource "aws_cloudwatch_dashboard" "iodp" {
           ]
           period = 300
           view   = "timeSeries"
+          region = var.aws_region
         }
       },
       {
@@ -137,6 +144,7 @@ resource "aws_cloudwatch_dashboard" "iodp" {
           period = 300
           stat   = "Sum"
           view   = "timeSeries"
+          region = var.aws_region
         }
       }
     ]

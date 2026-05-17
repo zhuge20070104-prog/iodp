@@ -96,8 +96,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "silver" {
     id     = "silver-lifecycle"
     status = "Enabled"
     filter { prefix = "" }
-    transition { days = 60;  storage_class = "STANDARD_IA" }
-    transition { days = 180; storage_class = "GLACIER_IR"  }
+    transition {
+      days          = 60
+      storage_class = "STANDARD_IA"
+    }
+    transition {
+      days          = 180
+      storage_class = "GLACIER_IR"
+    }
     expiration { days = 730 }
   }
 }
@@ -138,8 +144,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "gold" {
     status = "Enabled"
     filter { prefix = "" }
     # Gold 层数据访问频率较高，延迟 IA 转换
-    transition { days = 90;  storage_class = "STANDARD_IA" }
-    transition { days = 270; storage_class = "GLACIER_IR"  }
+    transition {
+      days          = 90
+      storage_class = "STANDARD_IA"
+    }
+    transition {
+      days          = 270
+      storage_class = "GLACIER_IR"
+    }
     expiration { days = 1095 }   # 3 年（业务合规要求）
   }
 }

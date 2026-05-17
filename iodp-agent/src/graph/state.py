@@ -106,11 +106,20 @@ def merge_synthesizer(
     """
     LangGraph reducer：合并并行运行的 ReplyAgent 和 BugReportAgent 的输出。
     两者分别设置 user_reply 和 bug_report，reducer 将两者合并到同一个结构中。
+
+    Turn 边界语义：
+      - main.py 每次新 job 调用 graph.ainvoke 时 initial_state.synthesizer=None
+      - 这是显式的"新 turn 开始，清空上一轮分析结果"信号
+      - 之前的实现 `if b is None: return a` 把 None 当"没贡献"处理，导致
+        上一 turn 的 user_reply 永远留下来，下一 turn 不管说啥都返回旧回复
+      - 现在：b is None 视为 reset；只有 a is None（首次写入）才直接用 b
     """
+    if b is None:
+        # turn 起点的显式重置（main.py initial_state 传 synthesizer=None）
+        return None
     if a is None:
         return b
-    if b is None:
-        return a
+    # 并行 fan-out 合并：reply_agent 设 user_reply，bug_report_agent 设 bug_report
     return SynthesizerOutput(
         user_reply=a.get("user_reply") or b.get("user_reply"),
         bug_report=a.get("bug_report") or b.get("bug_report"),

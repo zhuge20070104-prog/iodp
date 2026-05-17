@@ -1,31 +1,67 @@
 # glue_jobs/batch/silver_parse_logs.py
 """
-Glue Batch Job: Bronze app_logs → Silver parsed_logs
-每小时运行，对上一小时的 Bronze 数据做：
-  1. 去重（log_id 唯一）
-  2. 类型校正（event_timestamp 为 TIMESTAMP，req_duration_ms 为 DOUBLE）
-  3. 写入 Silver Iceberg 表，按 service_name + log_level 分区
+Glue Batch Job: Bronze app_logs (Firehose GZip NDJSON) → Silver parsed_logs
+
+读取上一小时 Firehose 落地的 GZip NDJSON：
+  s3://<bronze>/app_logs/year=YYYY/month=MM/day=DD/hour=HH/*.gz
+逐步完成：
+  1. 字段重命名（duration_ms → req_duration_ms，与 Silver/Gold schema 对齐）
+  2. DQ 检查（log_id 非空、log_level 枚举、error_code 字典）
+  3. 按 log_id 去重
+  4. 类型校正（req_duration_ms / http_status / event_timestamp）
+  5. MERGE 写入 Silver Iceberg 表
+
+DQ 由本 Job 承担（取代旧 Glue Streaming Job 的职责）。
+
+──────────────────────────────────────────────────────────────────────────────
+ Bronze NDJSON 预期 schema（Producer 端契约，schema-on-read 在 Spark 推断）
+──────────────────────────────────────────────────────────────────────────────
+   {
+     "log_id":          str  (UUID, required)        # 业务幂等键 / DQ：not null
+     "user_id":         str  (optional)
+     "service_name":    str  (required)               # 例：payment-service
+     "log_level":       str  (required)               # DQ：枚举 DEBUG/INFO/WARN/
+                                                      #      ERROR/FATAL
+     "error_code":      str  (optional)               # 例：E2001（log_level=ERROR 时填）
+     "error_message":   str  (optional)
+     "stack_trace":     str  (optional)
+     "req_path":        str  (optional)
+     "req_method":      str  (optional)               # GET / POST / PUT / ...
+     "http_status":     int  (optional)               # 在 Silver 强转 integer
+     "duration_ms":     int  (optional)               # ⚠ Bronze 写 duration_ms，
+                                                      #   Silver 重命名为 req_duration_ms
+     "trace_id":        str  (optional)
+     "event_timestamp": str  (ISO-8601, required)     # DQ：not null
+     "environment":     str  ("prod" / "dev" / ...)
+   }
+
+ ingest_timestamp 不由 producer 提供，本 Job 用 current_timestamp() 注入；
+ 用作去重排序键。
 """
 
 import sys
 from datetime import datetime, timedelta, timezone
 
+import boto3
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql.functions import (
-    col, current_timestamp, lit, row_number, to_timestamp,
+    col, current_timestamp, row_number, to_timestamp,
 )
 from pyspark.sql.window import Window
 
+from lib.data_quality import (
+    DataQualityChecker, rule_not_null, rule_in_set,
+)
 from lib.lineage import write_lineage_event
 from lib.iceberg_utils import configure_iceberg, iceberg_merge_dedup
 
 args = getResolvedOptions(sys.argv, [
-    "JOB_NAME", "BRONZE_BUCKET", "SILVER_BUCKET",
+    "JOB_NAME", "BRONZE_BUCKET", "BRONZE_PREFIX", "SILVER_BUCKET",
     "GLUE_DATABASE_BRONZE", "GLUE_DATABASE_SILVER",
-    "LINEAGE_TABLE", "ENVIRONMENT",
+    "LINEAGE_TABLE", "DQ_TABLE", "DQ_THRESHOLD_TABLE", "ENVIRONMENT",
 ])
 
 sc = SparkContext()
@@ -36,62 +72,123 @@ job.init(args["JOB_NAME"], args)
 
 configure_iceberg(spark, args["SILVER_BUCKET"])
 
-now_utc = datetime.now(timezone.utc)
+VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL"}
+
+# ─── 1. 拼出上一小时 Bronze 路径 ───
+now_utc    = datetime.now(timezone.utc)
 hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
 hour_start = hour_end - timedelta(hours=1)
 
-print(f"Processing window: {hour_start} ~ {hour_end}")
-
-# ─── 1. 读取 Bronze 上一小时数据 ───
-bronze_df = spark.read.format("iceberg").load(
-    f"glue_catalog.{args['GLUE_DATABASE_BRONZE']}.app_logs"
-).filter(
-    (col("ingest_timestamp") >= lit(hour_start.isoformat())) &
-    (col("ingest_timestamp") <  lit(hour_end.isoformat()))
+bronze_root    = args["BRONZE_BUCKET"]
+prefix_segment = args["BRONZE_PREFIX"].lstrip("/")
+hour_prefix    = (
+    f"{prefix_segment}"
+    f"year={hour_start.year:04d}/"
+    f"month={hour_start.month:02d}/"
+    f"day={hour_start.day:02d}/"
+    f"hour={hour_start.hour:02d}/"
 )
+bronze_path = f"{bronze_root}{hour_prefix}"
+print(f"Reading Bronze path: {bronze_path}  (window: {hour_start} ~ {hour_end})")
 
-input_count = bronze_df.count()
+# ─── 2. 路径不存在则提前结束 ───
+s3      = boto3.client("s3")
+bucket  = bronze_root.replace("s3://", "").rstrip("/")
+listing = s3.list_objects_v2(Bucket=bucket, Prefix=hour_prefix, MaxKeys=1)
+if "Contents" not in listing:
+    print(f"No Bronze data for window {hour_start.isoformat()}; nothing to do.")
+    job.commit()
+    sys.exit(0)
+
+# ─── 3. 读 Firehose GZip NDJSON ───
+bronze_raw  = spark.read.json(bronze_path)
+input_count = bronze_raw.count()
 print(f"Bronze records read: {input_count}")
 
-# ─── 2. 去重：同一 log_id 保留 ingest_timestamp 最早的那条 ───
-window = Window.partitionBy("log_id").orderBy(col("ingest_timestamp").asc())
-deduped_df = bronze_df \
+if input_count == 0:
+    print("Empty file set; nothing to do.")
+    job.commit()
+    sys.exit(0)
+
+# ─── 4. 字段标准化（producer 写 duration_ms，Silver/Gold 表用 req_duration_ms）+ 注入 ingest_timestamp ───
+normalized_df = bronze_raw.select(
+    col("log_id"),
+    col("user_id"),
+    col("service_name"),
+    col("log_level"),
+    col("error_code"),
+    col("error_message"),
+    col("stack_trace"),
+    col("req_path"),
+    col("req_method"),
+    col("http_status").cast("integer").alias("http_status"),
+    col("duration_ms").cast("double").alias("req_duration_ms"),
+    col("trace_id"),
+    to_timestamp(col("event_timestamp")).alias("event_timestamp"),
+    col("environment"),
+    current_timestamp().alias("ingest_timestamp"),
+)
+
+# ─── 5. DQ 检查 ───
+checker = DataQualityChecker(
+    table_name="bronze_app_logs",
+    batch_id=hour_start.strftime("%Y%m%d%H"),
+    job_run_id=args.get("JOB_RUN_ID", "unknown"),
+    dead_letter_base_path=f"{bronze_root}dead_letter/app_logs/",
+    dq_table_name=args["DQ_TABLE"],
+    failure_threshold=0.05,
+    environment=args["ENVIRONMENT"],
+)
+checker.add_rule(
+    rule_not_null("log_id")
+).add_rule(
+    rule_not_null("event_timestamp")
+).add_rule(
+    rule_in_set("log_level", valid_values=VALID_LOG_LEVELS, rule_name="valid_log_level")
+)
+
+valid_df, dead_letter_df, _ = checker.run(normalized_df)
+dq_dropped  = dead_letter_df.count()
+valid_count = valid_df.count()
+print(f"DQ: {valid_count} valid / {dq_dropped} dead-letter")
+
+# ─── 6. 按 log_id 去重 ───
+window     = Window.partitionBy("log_id").orderBy(col("ingest_timestamp").asc())
+deduped_df = valid_df \
     .withColumn("_rn", row_number().over(window)) \
     .filter(col("_rn") == 1) \
     .drop("_rn")
 
-# ─── 3. 类型标准化（Bronze 已做 to_timestamp，这里补充其他类型校正）───
+# ─── 7. 派生分区列 ───
 silver_df = deduped_df \
-    .withColumn("req_duration_ms", col("req_duration_ms").cast("double")) \
-    .withColumn("http_status",     col("http_status").cast("integer")) \
     .withColumn("processing_timestamp", current_timestamp()) \
     .withColumn("event_date", col("event_timestamp").cast("date"))
 
-# ─── 4. 写入 Silver Iceberg（MERGE 去重，幂等重跑）───
-silver_df.createOrReplaceTempView("silver_source")
+# ─── 8. MERGE 写入 Silver（幂等重跑）───
+silver_df.createOrReplaceTempView("silver_logs_source")
 iceberg_merge_dedup(
     spark=spark,
-    source_view="silver_source",
+    source_view="silver_logs_source",
     target_table=f"glue_catalog.{args['GLUE_DATABASE_SILVER']}.parsed_logs",
     merge_keys=["log_id"],
 )
 
-output_count = silver_df.count()
-dedup_removed = input_count - output_count
+output_count  = silver_df.count()
+dedup_removed = valid_count - output_count
 print(f"Silver records written: {output_count} (deduped {dedup_removed})")
 
-# ─── 5. 血缘记录 ───
-# 去重丢掉的行是 Kafka at-least-once 预期内的重复，不是 DQ 死信；
-# 把去重数量塞进 transformation 字符串，dead_letter 字段保持 0。
+# ─── 9. 血缘 ───
 write_lineage_event(
     source_table=f"s3://iodp-bronze-{args['ENVIRONMENT']}/app_logs/",
     target_table=f"s3://iodp-silver-{args['ENVIRONMENT']}/parsed_logs/",
-    transformation=f"DEDUP(log_id) removed {dedup_removed} + TYPE_CAST",
+    transformation=(
+        f"NORMALIZE + DQ(dropped={dq_dropped}) + DEDUP(removed={dedup_removed}) + TYPE_CAST"
+    ),
     job_name=args["JOB_NAME"],
     job_run_id=args.get("JOB_RUN_ID", "unknown"),
     record_count_in=input_count,
     record_count_out=output_count,
-    record_count_dead_letter=0,
+    record_count_dead_letter=dq_dropped,
     lineage_table=args["LINEAGE_TABLE"],
 )
 

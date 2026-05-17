@@ -7,14 +7,13 @@ Reply Agent 节点（从原 Synthesizer 拆分）
   - 与 BugReportAgent 并行执行（LangGraph fan-out）
 """
 
-from langchain_aws import ChatBedrock
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..state import (
     AgentState, SynthesizerOutput,
-    get_error_logs, get_retrieved_docs, get_user_id, get_intent, get_incident_time_hint,
+    get_error_logs, get_retrieved_docs, get_intent, get_incident_time_hint,
 )
-from src.config import settings
+from ._llm_helpers import build_router_llm, cached_system
 
 REPLY_SYSTEM_PROMPT = """
 你是一个企业级智能客服系统的用户回复专家。
@@ -59,14 +58,10 @@ def reply_agent_node(state: AgentState) -> dict:
         f"最高错误率：{top_error_rate:.1%}"
     )
 
-    llm = ChatBedrock(
-        model_id=settings.bedrock_model_id,
-        region_name=settings.aws_region,
-        model_kwargs={"max_tokens": 512, "temperature": 0.1},
-    )
+    llm = build_router_llm(max_tokens=512, temperature=0.1)
 
     response = llm.invoke([
-        SystemMessage(content=REPLY_SYSTEM_PROMPT),
+        cached_system(REPLY_SYSTEM_PROMPT),
         HumanMessage(content=context),
     ])
 

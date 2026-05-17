@@ -9,19 +9,24 @@
 - TTL = 7天（对话过期后自动清理，FinOps）
 """
 
-import boto3
-from langgraph.checkpoint.dynamodb import DynamoDBSaver   # pip install langgraph-checkpoint-dynamodb
-from src.config import settings
+from langgraph.checkpoint.memory import MemorySaver
 
 
-def get_checkpointer() -> DynamoDBSaver:
+# 模块级单例：同一 Lambda 容器内所有 invocation 共享同一份 checkpointer，
+# 使多轮对话（thread_id 复用）能跨 invocation 恢复历史状态。
+# 之前每次 get_checkpointer() 都 new 一个新 MemorySaver，导致多轮对话丢失上下文。
+_CHECKPOINTER = MemorySaver()
+
+
+def get_checkpointer() -> MemorySaver:
     """
-    创建并返回 DynamoDB Checkpointer 实例
+    多轮对话状态 = Lambda 容器内存（单例）。
+    - 同一容器复用期间（5-15 min 空闲窗口）多轮对话连续。
+    - Lambda 冷启动后状态丢失。Demo 单次对话足够。
+
+    升级到 DynamoDB 持久化的路径（待办）：
+    - 当前社区包 langgraph-checkpoint-dynamodb (Justin Ramsey) 要求两张表：
+      checkpoints_table + writes_table，schema 跟现有 iodp-agent-state-{env} 不兼容。
+    - 需在 main.tf 增加第二张 dynamodb 表，再回切到 DynamoDBSaver(checkpoints_table_name=..., writes_table_name=..., client_config={"region_name": ...})。
     """
-    dynamodb_client = boto3.client("dynamodb", region_name=settings.aws_region)
-    return DynamoDBSaver(
-        client=dynamodb_client,
-        table_name=settings.agent_state_table,
-        ttl_attribute="TTL",
-        ttl_seconds=7 * 24 * 3600,   # 7 天 TTL（FinOps）
-    )
+    return _CHECKPOINTER

@@ -38,3 +38,10 @@ variable "athena_result_bucket" {
   description = "S3 bucket for Athena query results"
   type        = string
 }
+
+variable "llm_api_key" {
+  description = "OpenAI-compatible LLM API key (DeepSeek / 通义 / 智谱 / OpenAI). 通过环境变量 TF_VAR_llm_api_key 传入。"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

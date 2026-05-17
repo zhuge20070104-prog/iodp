@@ -6,8 +6,11 @@ mangum>=0.17.0
 # LangChain + LangGraph
 langchain>=0.2.0
 langchain-aws>=0.1.0
+langchain-openai>=0.2.0    # OpenAI 兼容 endpoint：DeepSeek / 通义千问 / 智谱 GLM 都走这个
 langgraph>=0.2.0
 langgraph-checkpoint>=0.2.0
+# DynamoDB checkpointer for multi-turn conversation state
+langgraph-checkpoint-dynamodb>=0.0.4
 
 # AWS SDK (boto3 1.40+ ships with the s3vectors client)
 boto3>=1.40.0

@@ -40,19 +40,6 @@ variable "scripts_bucket_name" {
   type        = string
 }
 
-# ─── MSK ───
-
-variable "msk_cluster_arn" {
-  description = "MSK Serverless cluster ARN"
-  type        = string
-}
-
-variable "msk_bootstrap_brokers" {
-  description = "MSK bootstrap brokers (IAM auth)"
-  type        = string
-  sensitive   = true
-}
-
 # ─── DynamoDB ───
 
 variable "dq_reports_table_arn" {
@@ -100,7 +87,7 @@ variable "tags" {
 # ─── Triggers ───
 
 variable "triggers_enabled" {
-  description = "Whether Glue scheduled triggers are active. Keep false on first deploy until Athena DDL has created the Iceberg tables; flip to true afterwards."
+  description = "Whether Glue scheduled triggers are active. Default false (manual mode) for FinOps."
   type        = bool
-  default     = true
+  default     = false
 }

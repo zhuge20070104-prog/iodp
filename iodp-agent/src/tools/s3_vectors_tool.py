@@ -20,16 +20,23 @@ import json
 from src.config import settings
 
 
-def _get_embedding(text: str, region: str) -> List[float]:
-    """使用 Bedrock Titan Embeddings V2 生成文本向量"""
-    bedrock = boto3.client("bedrock-runtime", region_name=region)
-    response = bedrock.invoke_model(
-        modelId="amazon.titan-embed-text-v2:0",
-        body=json.dumps({"inputText": text, "dimensions": 1024, "normalize": True}),
-        contentType="application/json",
-        accept="application/json",
+def _get_embedding(text: str, region: str = None) -> List[float]:
+    """通过 OpenAI 兼容 endpoint 获取查询向量（默认通义千问 text-embedding-v3, 1024 维）。
+
+    AWS Bedrock 在中国注册账号下整体被 allowlist，所以 embedding 也不能用 Bedrock，
+    改走 OpenAI 兼容 API。`region` 参数保留只为向后兼容，实际不再使用。
+    """
+    from openai import OpenAI  # lazy import 避免 module 初始化时报错
+    client = OpenAI(
+        api_key=settings.embedding_api_key or settings.llm_api_key,
+        base_url=settings.embedding_base_url or settings.llm_base_url,
     )
-    return json.loads(response["body"].read())["embedding"]
+    resp = client.embeddings.create(
+        model=settings.embedding_model,
+        input=text[:2048],
+        dimensions=settings.embedding_dimensions,
+    )
+    return resp.data[0].embedding
 
 
 def vector_search(

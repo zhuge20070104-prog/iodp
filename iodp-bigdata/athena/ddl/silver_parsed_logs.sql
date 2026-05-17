@@ -26,9 +26,7 @@ CREATE TABLE IF NOT EXISTS iodp_silver_${ENVIRONMENT}.parsed_logs (
 PARTITIONED BY (event_date)
 LOCATION 's3://iodp-silver-${ENVIRONMENT}-${ACCOUNT_ID}/parsed_logs/'
 TBLPROPERTIES (
-    'table_type'                        = 'ICEBERG',
-    'format'                            = 'parquet',
-    'write.parquet.compression-codec'   = 'snappy',
-    'write.delete.mode'                 = 'merge-on-read',
-    'write.update.mode'                 = 'merge-on-read'
+    'table_type'        = 'ICEBERG',
+    'format'            = 'parquet',
+    'write_compression' = 'snappy'
 );

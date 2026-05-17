@@ -7,12 +7,12 @@ RAG Agent 节点 v2
 后端：Amazon S3 Vectors（GA 2025-12 取代 OpenSearch Serverless，成本降低 ~90%）
 """
 
-from langchain_aws import ChatBedrock
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..state import AgentState, RAGDocument, RAGOutput, get_error_logs
 from src.config import settings
 from src.tools.s3_vectors_tool import vector_search
+from ._llm_helpers import build_router_llm, cached_system
 
 RAG_QUERY_GENERATION_PROMPT = """
 你是一个检索专家。根据以下信息，生成一段用于向量检索的自然语言查询，
@@ -44,14 +44,10 @@ def rag_agent_node(state: AgentState) -> dict:
         f"错误率：{max_error_rate:.1%}"
     )
 
-    llm = ChatBedrock(
-        model_id=settings.bedrock_model_id,
-        region_name=settings.aws_region,
-        model_kwargs={"max_tokens": 512, "temperature": 0},
-    )
+    llm = build_router_llm(max_tokens=512, temperature=0)
 
     rag_query_response = llm.invoke([
-        SystemMessage(content=RAG_QUERY_GENERATION_PROMPT),
+        cached_system(RAG_QUERY_GENERATION_PROMPT),
         HumanMessage(content=context_for_rag),
     ])
     rag_query = rag_query_response.content.strip()
@@ -59,7 +55,7 @@ def rag_agent_node(state: AgentState) -> dict:
     try:
         raw_hits = vector_search(
             query_text=rag_query,
-            index_names=["product_docs", "incident_solutions"],
+            index_names=["product-docs", "incident-solutions"],
             top_k=5,
             vector_bucket_name=settings.vector_bucket_name,
             region=settings.aws_region,

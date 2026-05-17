@@ -20,6 +20,7 @@ ATHENA_WORKGROUP="${ATHENA_WORKGROUP:-primary}"
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DDL_DIR="$PROJECT_ROOT/athena/ddl"
+VIEWS_DIR="$PROJECT_ROOT/athena/views"
 
 echo "=== Applying DDL templates ==="
 echo "  ENVIRONMENT : $ENVIRONMENT"
@@ -31,7 +32,10 @@ echo ""
 # Athena 查询结果输出位置（用 bronze bucket 下的 athena-results/ 目录）
 OUTPUT_LOCATION="s3://iodp-bronze-${ENVIRONMENT}-${ACCOUNT_ID}/athena-results/"
 
-for ddl_file in "$DDL_DIR"/*.sql; do
+# 先建表（DDL），再建视图（views 引用底层表）
+# 之前只跑 ddl/*.sql，views/*.sql 被遗漏，导致 v_error_log_enriched 从未建立，
+# agent log_analyzer 一调就报 "view not found"。
+for ddl_file in "$DDL_DIR"/*.sql "$VIEWS_DIR"/*.sql; do
     filename=$(basename "$ddl_file")
     echo "--- Processing $filename ---"
 

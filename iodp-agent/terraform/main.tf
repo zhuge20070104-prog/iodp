@@ -35,6 +35,8 @@ provider "aws" {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
 locals {
   project_name = "iodp-agent"
   name_prefix  = "${local.project_name}-${var.environment}"
@@ -91,7 +93,7 @@ resource "aws_s3vectors_vector_bucket" "rag" {
 
 resource "aws_s3vectors_index" "incident_solutions" {
   vector_bucket_name = aws_s3vectors_vector_bucket.rag.vector_bucket_name
-  index_name         = "incident_solutions"
+  index_name         = "incident-solutions"
   data_type          = "float32"
   dimension          = 1024
   distance_metric    = "cosine"
@@ -113,7 +115,7 @@ resource "aws_s3vectors_index" "incident_solutions" {
 
 resource "aws_s3vectors_index" "product_docs" {
   vector_bucket_name = aws_s3vectors_vector_bucket.rag.vector_bucket_name
-  index_name         = "product_docs"
+  index_name         = "product-docs"
   data_type          = "float32"
   dimension          = 1024
   distance_metric    = "cosine"
@@ -178,8 +180,15 @@ resource "aws_iam_role_policy" "lambda_app" {
       {
         Sid      = "DynamoDBBigDataRead"
         Effect   = "Allow"
-        Action   = ["dynamodb:GetItem", "dynamodb:Query"]
-        Resource = [var.bigdata_dq_reports_table_arn]
+        Action   = ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"]
+        # bigdata 实际表名是 iodp-dq-reports-{env}（连字符），但 root Makefile fallback ARN
+        # 用了下划线（iodp_dq_reports_{env}）。这里两种都授权，避免 ARN 不一致导致 AccessDenied。
+        Resource = [
+          "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/iodp-dq-reports-${var.environment}",
+          "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/iodp-dq-reports-${var.environment}/index/*",
+          var.bigdata_dq_reports_table_arn,
+          "${var.bigdata_dq_reports_table_arn}/index/*",
+        ]
       },
       {
         Sid    = "AthenaQuery"
@@ -193,29 +202,56 @@ resource "aws_iam_role_policy" "lambda_app" {
       {
         Sid    = "AthenaResultBucket"
         Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation"]
+        Action = ["s3:GetObject", "s3:PutObject", "s3:GetBucketLocation", "s3:ListBucket"]
         Resource = [
-          "arn:aws:s3:::${replace(var.athena_result_bucket, "s3://", "")}",
-          "arn:aws:s3:::${replace(var.athena_result_bucket, "s3://", "")}/*",
+          aws_s3_bucket.athena_results.arn,
+          "${aws_s3_bucket.athena_results.arn}/*",
         ]
       },
       {
         Sid      = "GlueCatalogRead"
         Effect   = "Allow"
-        Action   = ["glue:GetDatabase", "glue:GetDatabases", "glue:GetTable", "glue:GetTables"]
-        Resource = ["arn:aws:glue:${var.aws_region}:*:catalog", "arn:aws:glue:${var.aws_region}:*:database/*", "arn:aws:glue:${var.aws_region}:*:table/*/*"]
+        Action   = [
+          "glue:GetDatabase", "glue:GetDatabases",
+          "glue:GetTable", "glue:GetTables",
+          # Iceberg view 需要这些：解析 view 的底层 partition + Iceberg metadata
+          "glue:GetPartition", "glue:GetPartitions",
+        ]
+        Resource = [
+          "arn:aws:glue:${var.aws_region}:*:catalog",
+          "arn:aws:glue:${var.aws_region}:*:database/*",
+          "arn:aws:glue:${var.aws_region}:*:table/*/*",
+        ]
       },
       {
-        Sid      = "S3GoldBucketRead"
+        Sid      = "S3GoldSilverBucketRead"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:ListBucket"]
-        Resource = [var.bigdata_gold_bucket_arn, "${var.bigdata_gold_bucket_arn}/*"]
+        # bigdata 实际 bucket 名带 account_id 后缀（iodp-gold-{env}-{account_id}），
+        # 但 root Makefile 的 fallback ARN 没有 account_id（root cause: bigdata 没 output gold_bucket_arn）。
+        # v_error_log_enriched view JOIN silver+gold，两个都要授权。
+        # 用通配 *  既覆盖现有 bucket 也兼容 ARN 配错的情况。
+        Resource = [
+          var.bigdata_gold_bucket_arn,
+          "${var.bigdata_gold_bucket_arn}/*",
+          "arn:aws:s3:::iodp-gold-${var.environment}-*",
+          "arn:aws:s3:::iodp-gold-${var.environment}-*/*",
+          "arn:aws:s3:::iodp-silver-${var.environment}-*",
+          "arn:aws:s3:::iodp-silver-${var.environment}-*/*",
+        ]
       },
       {
         Sid      = "BedrockInvoke"
         Effect   = "Allow"
         Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-        Resource = ["arn:aws:bedrock:${var.aws_region}::foundation-model/*"]
+        # 三类 ARN：
+        # 1. foundation-model/* — Cohere embedding 直调 + inference profile 底层调到的模型
+        # 2. inference-profile/* — global.* / apac.* 跨区调用的入口
+        # 3. 所有 region (*) — global.* 会自动路由到任何 region 的 foundation model
+        Resource = [
+          "arn:aws:bedrock:*::foundation-model/*",
+          "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/*",
+        ]
       },
       {
         Sid    = "S3VectorsAccess"
@@ -228,8 +264,8 @@ resource "aws_iam_role_policy" "lambda_app" {
           "s3vectors:ListVectors",
         ]
         Resource = [
-          aws_s3vectors_vector_bucket.rag.arn,
-          "${aws_s3vectors_vector_bucket.rag.arn}/index/*",
+          aws_s3vectors_vector_bucket.rag.vector_bucket_arn,
+          "${aws_s3vectors_vector_bucket.rag.vector_bucket_arn}/index/*",
         ]
       },
     ]
@@ -255,10 +291,15 @@ resource "aws_lambda_function" "agent" {
       IODP_AGENT_STATE_TABLE    = module.dynamodb.agent_state_table_name
       IODP_AGENT_JOBS_TABLE     = module.dynamodb.agent_jobs_table_name
       IODP_BUG_TICKETS_TABLE    = module.dynamodb.tickets_table_name
-      IODP_DQ_REPORTS_TABLE     = replace(element(split("/", var.bigdata_dq_reports_table_arn), length(split("/", var.bigdata_dq_reports_table_arn)) - 1), "iodp_", "iodp-")
+      # bigdata 实际 DQ 表名是连字符 iodp-dq-reports-{env}，直接按约定 hardcode
+      # 不再从 ARN 解析（解析逻辑只替换第一个 iodp_ 会得到 iodp-dq_reports_dev 错的）
+      IODP_DQ_REPORTS_TABLE     = "iodp-dq-reports-${var.environment}"
       IODP_VECTOR_BUCKET_NAME   = aws_s3vectors_vector_bucket.rag.vector_bucket_name
       IODP_ATHENA_WORKGROUP     = var.athena_workgroup
-      IODP_ATHENA_RESULT_BUCKET = var.athena_result_bucket
+      # 用 agent 自建的 athena results bucket，不再依赖外部 var.athena_result_bucket
+      IODP_ATHENA_RESULT_BUCKET = "s3://${aws_s3_bucket.athena_results.bucket}/"
+      # OpenAI 兼容 LLM（DeepSeek / 通义 / 智谱），api key 通过 var 传入避免硬编码
+      IODP_LLM_API_KEY          = var.llm_api_key
     }
   }
 
@@ -350,6 +391,36 @@ resource "aws_lambda_permission" "apigw" {
   function_name = aws_lambda_function.agent.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.agent.execution_arn}/*/*"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Athena Query Results bucket（log_analyzer 跑 SQL 需要 output location）
+# 之前依赖外部 bucket（iodp-athena-results-dev）但从未创建，导致 Athena 报
+# InvalidBucketName。这里 agent 自建一个专用 bucket，IAM 也对应放开。
+# ═══════════════════════════════════════════════════════════════
+
+resource "aws_s3_bucket" "athena_results" {
+  bucket        = "${local.name_prefix}-athena-results"
+  force_destroy = true
+  tags          = local.tags
+}
+
+resource "aws_s3_bucket_public_access_block" "athena_results" {
+  bucket                  = aws_s3_bucket.athena_results.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "athena_results" {
+  bucket = aws_s3_bucket.athena_results.id
+  rule {
+    id     = "expire-old-queries"
+    status = "Enabled"
+    filter { prefix = "" }
+    expiration { days = 7 }   # Athena 查询结果 7 天自动清理
+  }
 }
 
 # ═══════════════════════════════════════════════════════════════

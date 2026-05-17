@@ -32,8 +32,31 @@ class Settings(BaseSettings):
     # 单个 vector bucket 下挂多个 index：incident_solutions / product_docs
     vector_bucket_name: str = ""
 
-    # Bedrock
-    bedrock_model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    # ─── LLM (OpenAI 兼容 endpoint, 默认通义千问 qwen) ───
+    # 中国大陆注册的 AWS 账号过不了 Bedrock allowlisting，改用第三方 OpenAI 兼容 API。
+    # 用通义千问的原因：一个 dashscope key 同时支持 chat + embedding，简化运维。
+    # 切换 provider 只改这几行 + 重 deploy 即可：
+    #   DeepSeek:  base_url="https://api.deepseek.com"  chat=deepseek-chat（注：DeepSeek 无 embedding，要单独配 embedding provider）
+    #   通义千问:  base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  chat=qwen-max/qwen-turbo  embed=text-embedding-v3
+    #   智谱 GLM:   base_url="https://open.bigmodel.cn/api/paas/v4"  chat=glm-4/glm-4-flash  embed=embedding-3
+    #   OpenAI:    base_url 留空（默认）  chat=gpt-4o/gpt-4o-mini  embed=text-embedding-3-small
+    llm_base_url:        str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_api_key:         str = ""             # 通过环境变量 IODP_LLM_API_KEY 注入
+    llm_reasoning_model: str = "qwen-max"     # 复杂推理
+    llm_router_model:    str = "qwen-turbo"   # 简单分类（便宜 ~5x）
+
+    # ─── Embedding (OpenAI 兼容 endpoint，默认复用 LLM provider) ───
+    # base_url / api_key 留空时复用 llm_base_url / llm_api_key
+    embedding_base_url:   str = ""                      # 留空 = 复用 llm_base_url
+    embedding_api_key:    str = ""                      # 留空 = 复用 llm_api_key
+    embedding_model:      str = "text-embedding-v3"     # qwen v3，输出 1024 维
+    embedding_dimensions: int = 1024                    # 跟 S3 Vectors index dimension 必须一致
+
+    # ↓ 旧 Bedrock 字段保留为别名避免历史代码 AttributeError，已废弃不再读取
+    bedrock_reasoning_model_id:   str = ""
+    bedrock_router_model_id:      str = ""
+    bedrock_model_id:             str = ""
+    bedrock_prompt_cache_enabled: bool = False
 
     # 环境
     environment: str = "prod"

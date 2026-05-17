@@ -14,14 +14,14 @@ import uuid
 from datetime import datetime, timezone
 
 import boto3
-from langchain_aws import ChatBedrock
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..state import (
     AgentState, BugReport, SynthesizerOutput,
     get_error_logs, get_retrieved_docs, get_user_id, get_incident_time_hint,
 )
 from src.config import settings
+from ._llm_helpers import build_reasoning_llm, cached_system
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,9 @@ def bug_report_agent_node(state: AgentState) -> dict:
     time_hint      = get_incident_time_hint(state) or "近期"
     raw_input      = state.get("raw_user_input", "")
 
+    # Anonymous 模式：用户没有提供账户ID，bug_report 应说明这是全平台级别诊断
+    is_anonymous = user_id in ("anonymous", "unknown")
+
     top_error_rate  = max((log["error_rate"] for log in error_logs), default=0.0)
     top_error_codes = list({log["error_code"] for log in error_logs if log.get("error_code")})
     top_services    = list({log["service_name"] for log in error_logs if log.get("service_name")})
@@ -113,6 +116,14 @@ def bug_report_agent_node(state: AgentState) -> dict:
         f"[{d['doc_type']}] {d['title']}\n{d['content'][:500]}"
         for d in retrieved_docs[:3]
     ]) if retrieved_docs else "无相关文档"
+
+    anonymous_note = (
+        "\n\n【特殊说明】本次诊断为 ANONYMOUS 模式：用户未提供账户ID，"
+        "日志查询按时间窗口检索全平台聚合异常，非该用户专属事件。"
+        "请在 root_cause 中明确『该时段平台层面存在 XX 故障，可能影响了您』，"
+        "并在 recommended_fix 末尾追加『建议提供账户ID以精确定位个人事件』。"
+        if is_anonymous else ""
+    )
 
     context = f"""
 用户原始投诉：{raw_input}
@@ -129,17 +140,13 @@ def bug_report_agent_node(state: AgentState) -> dict:
 - 最高错误率：{top_error_rate:.1%}
 - 涉及错误码：{top_error_codes}
 - 受影响服务：{top_services}
-- TraceID 样本：{trace_samples}
+- TraceID 样本：{trace_samples}{anonymous_note}
 """.strip()
 
-    llm = ChatBedrock(
-        model_id=settings.bedrock_model_id,
-        region_name=settings.aws_region,
-        model_kwargs={"max_tokens": 2048, "temperature": 0},
-    )
+    llm = build_reasoning_llm(max_tokens=2048, temperature=0)
 
     response = llm.invoke([
-        SystemMessage(content=BUG_REPORT_SYSTEM_PROMPT),
+        cached_system(BUG_REPORT_SYSTEM_PROMPT),
         HumanMessage(content=context),
     ])
 

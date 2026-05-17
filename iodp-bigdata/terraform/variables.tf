@@ -33,33 +33,24 @@ variable "team_owner" {
   default     = "data-engineering@company.com"
 }
 
-# ─── Networking ───
+# ─── Ingestion (Kinesis Data Firehose) ───
 
-variable "vpc_cidr" {
-  description = "VPC CIDR block"
-  type        = string
-  default     = "10.0.0.0/16"
-}
-
-variable "availability_zones" {
-  description = "AZs for subnet deployment (at least 2 for MSK)"
+variable "firehose_streams" {
+  description = "Logical stream names — one Firehose delivery stream per name."
   type        = list(string)
-  default     = ["us-east-1a", "us-east-1b"]
+  default     = ["clickstream", "app_logs"]
 }
 
-# ─── Streaming ───
+variable "firehose_buffer_size_mb" {
+  description = "Firehose buffering size in MB before flushing to S3."
+  type        = number
+  default     = 5
+}
 
-variable "kafka_topics" {
-  description = "MSK Kafka topic definitions"
-  type = list(object({
-    name       = string
-    partitions = number
-    retention  = number  # hours
-  }))
-  default = [
-    { name = "user_clickstream",  partitions = 6, retention = 168 },
-    { name = "system_app_logs",   partitions = 6, retention = 168 },
-  ]
+variable "firehose_buffer_interval_sec" {
+  description = "Firehose buffering interval in seconds before flushing to S3."
+  type        = number
+  default     = 60
 }
 
 # ─── Observability ───
@@ -88,13 +79,21 @@ variable "vector_bucket_arn" {
 variable "vector_index_name" {
   description = "S3 Vectors index name written by the indexer Lambda"
   type        = string
-  default     = "incident_solutions"
+  default     = "incident-solutions"
 }
 
 # ─── Deployment orchestration ───
 
 variable "triggers_enabled" {
-  description = "Whether Glue scheduled triggers are active. Set false during first deploy so cron does not fire before Athena DDL has created Iceberg tables."
+  description = <<-EOT
+    Whether Glue scheduled triggers are active.
+
+    Default is FALSE (manual-trigger mode) for FinOps reasons — auto-running
+    Silver hourly + Gold hourly + Gold daily costs ~$35/week even when idle.
+    In demo/dev usage, prefer manual invocation via `make demo-pipeline`.
+
+    Set to true only when you need 24x7 fresh data (true production usage).
+  EOT
   type        = bool
-  default     = true
+  default     = false
 }

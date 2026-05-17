@@ -1,16 +1,6 @@
 # terraform/outputs.tf
 # 关键资源输出，供 CI/CD 和 Agent 项目引用
 
-# ─── Networking ───
-
-output "vpc_id" {
-  value = module.networking.vpc_id
-}
-
-output "private_subnet_ids" {
-  value = module.networking.private_subnet_ids
-}
-
 # ─── Storage ───
 
 output "bronze_bucket_name" {
@@ -29,15 +19,11 @@ output "scripts_bucket_name" {
   value = module.storage.scripts_bucket_name
 }
 
-# ─── Streaming ───
+# ─── Ingestion (Firehose) ───
 
-output "msk_cluster_arn" {
-  value = module.streaming.msk_cluster_arn
-}
-
-output "msk_bootstrap_brokers" {
-  value     = module.streaming.bootstrap_brokers_sasl_iam
-  sensitive = true
+output "firehose_delivery_streams" {
+  description = "Firehose delivery stream names — producers use boto3 put_record against these"
+  value       = module.ingestion.delivery_stream_names
 }
 
 # ─── DynamoDB ───

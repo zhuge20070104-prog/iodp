@@ -1,34 +1,26 @@
 # iodp-bigdata 基础设施详解
 
-本文逐目录讲解 `terraform/`、`athena/`、`schemas/` 三个目录的作用，以及它们如何串联起整条数据流。
+本文逐目录讲解 `terraform/`、`athena/`、`glue_jobs/` 几个目录的作用，以及它们如何串联起整条数据流。
+
+> **架构注**：本项目当前为 **方案 D**（FinOps 优化版）：
+> - 数据入口：Kinesis Data Firehose Direct PUT（取代 MSK Serverless）
+> - 计算层：仅 Glue Batch（取代常驻 Glue Streaming），默认手动触发
+> - 网络层：完全无 VPC（Firehose 是托管公网服务）
+>
+> 周费从 ~$575 降到 ~$15（97% 优化）。详见 [INTERVIEW.md](../INTERVIEW.md) 中的 FinOps 决策说明。
 
 ---
 
-## 1. schemas/ — Kafka 消息的 JSON Schema 契约
+## 1. 数据契约 —— 在哪里
 
-这个目录定义了从 Kafka 进来的原始 JSON 消息长什么样，是整条数据流的"源头契约"。
+方案 D 下，Bronze 是 schema-on-read 的 GZip NDJSON（Firehose 不做 schema 校验），因此项目里**不再维护独立的 schemas/ 目录或 PySpark schema 文件**。契约定义就近放在两个地方：
 
-### schemas/system_app_logs.json
+- **Producer 端示例**：`scripts/produce_sample_events.py` 的 `_make_clickstream_event()` / `_make_app_log_event()` —— 上游应用照这个结构往 Firehose `put_record_batch`。
+- **Silver Job docstring**：`glue_jobs/batch/silver_enrich_clicks.py` 和 `silver_parse_logs.py` 头部的 "Bronze NDJSON 预期 schema" 注释块 —— 字段名、必填性、DQ 规则、嵌套结构、字段重命名都列在那里。
 
-- 定义了 `system_app_logs` Kafka Topic 的消息格式。
-- 必填字段：`log_id`（UUID）、`service_name`、`log_level`（DEBUG/INFO/WARN/ERROR/FATAL）、`event_timestamp`、`message`。
-- 可选嵌套对象：`error_details`（error_code、error_type、stack_trace、http_status）、`request_info`（method、path、user_id、duration_ms）。
-- 对应的 PySpark Schema 定义在 `glue_jobs/lib/schema_definitions.py` 的 `APP_LOG_SCHEMA`。
-- 对应的 Glue Streaming Job 是 `stream_app_logs.py`，它的 `from_json()` 就是按这个结构解析的。
-
-### schemas/user_clickstream.json
-
-- 定义了 `user_clickstream` Kafka Topic 的消息格式。
-- 必填字段：`event_id`（UUID）、`user_id`（非空）、`session_id`、`event_type`（click/view/scroll/purchase/add_to_cart/checkout）、`event_timestamp`、`page_url`。
-- 可选嵌套对象：`device_info`（device_type、os、browser、screen_resolution）、`geo_info`（country_code、city、ip_hash）、`properties`（业务自定义字段如 product_id、amount）。
-- 对应的 PySpark Schema 定义在 `glue_jobs/lib/schema_definitions.py` 的 `CLICKSTREAM_SCHEMA`。
-- 对应的 Glue Streaming Job 是 `stream_clickstream.py`。
-
-### 这个目录的作用
-
-- 它是给人看的文档，不是被代码直接 import 的。
-- 上游服务（发消息到 Kafka 的应用）按这个 Schema 发数据。
-- 如果上游改了字段，数据工程师需要同步更新这里的 JSON Schema、`schema_definitions.py` 里的 PySpark Schema、以及 `athena/ddl/` 里的建表 SQL。
+如果上游改了字段：
+- 安全降级：未声明的字段会落到 Bronze NDJSON 里，**不丢数据**，但 Silver 暂时忽略它。
+- 想用新字段：改 Silver Job 的 `select()` 段把字段提取出来 + 改 Silver Iceberg DDL 加列。
 
 ---
 
@@ -36,7 +28,7 @@
 
 这个目录用 Terraform 管理 AWS 资源。每个子目录是一个独立模块，可以在上层 `main.tf` 里被 `module "xxx" { source = "./modules/xxx" }` 引用。
 
-目前有 4 个模块：
+方案 D 下共 8 个模块：`storage` / `dynamodb` / `ingestion`(Firehose) / `compute`(Glue Batch + Catalog) / `observability` / `dlq_replay` / `replay_jobs` / `vector_indexer`。本节挑后 4 个增值模块详解；前 4 个核心模块（storage / dynamodb / ingestion / compute）的字段含义见 [USAGE.md](./USAGE.md) 的"参数传递链路"。
 
 ### 2.1 terraform/modules/dynamodb/ — 元数据存储
 
@@ -82,12 +74,14 @@
 #### 它在数据流中的位置
 
 ```
-streaming job 产生死信 → s3://bronze/dead_letter/
-                              ↓ (手动触发 Lambda)
-                         s3://bronze/replay/
-                              ↓ (手动触发 Glue Job)
-                         Bronze Iceberg 表
+Silver Batch Job 产生死信 → s3://bronze/dead_letter/
+                                ↓ (手动触发 Lambda)
+                           s3://bronze/replay/
+                                ↓ (手动触发 Glue Job)
+                           Bronze Iceberg 表
 ```
+
+> 方案 D 下 DQ 已迁移到 Silver 层（取代原 Glue Streaming），死信仍写到 `s3://<bronze>/dead_letter/<table>/`，重灌回路逻辑不变。
 
 Lambda 只做"搬运"（从 dead_letter/ 复制到 replay/），不做数据转换。
 
@@ -171,18 +165,11 @@ Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
 
 这个目录存放需要在 Athena 里执行的 SQL，分两类：`ddl/`（建表）和 `views/`（视图）。
 
-**重要**：这些 SQL 不会被 Terraform 自动执行。它们是手动在 Athena Console 或 CLI 里跑的，或者首次部署时作为初始化脚本执行。Glue Streaming Job 运行前，对应的 Iceberg 表必须已经存在。
+**重要**：这些 SQL 不会被 Terraform 自动执行。它们是手动在 Athena Console 或 CLI 里跑的，或者首次部署时作为初始化脚本执行。Silver/Gold 的 Glue Batch Job 运行前，对应的 Iceberg 表必须已经存在（Bronze 层不需要建表，Firehose 直接落 GZip NDJSON 到 S3 即可）。
 
 ### 3.1 athena/ddl/ — Iceberg 建表语句
 
-#### ddl/bronze_clickstream.sql
-
-- 建表：`iodp_bronze_prod.clickstream`。
-- 格式：Iceberg + Parquet + Snappy 压缩。
-- 分区：`event_type`（click/view/scroll/purchase/add_to_cart/checkout）。
-- 18 个业务列 + `ingest_timestamp` + `processing_timestamp`。
-- 额外属性：`delete-after-commit.enabled = true`，最多保留 10 个历史元数据版本。
-- 写入方：`stream_clickstream.py`（Glue Streaming Job，60 秒 micro-batch）。
+> ⚠️ 方案 D 下已删除 `bronze_*.sql` —— Bronze 由 Firehose 直接落 GZip NDJSON 到 S3，无 Iceberg 表、无 DDL。Bronze schema 见 silver_*.py 头部 docstring。
 
 #### ddl/silver_enriched_clicks.sql
 
@@ -230,69 +217,57 @@ Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
 
 ---
 
-## 4. 全流程串联：从 Kafka 到 Agent 查询
-
-把上面所有组件串起来，完整数据流如下：
+## 4. 全流程串联：方案 D 数据流
 
 ```
-                        schemas/
-                    (JSON Schema 契约)
-                          │
-                          │ 上游应用按 Schema 发消息
-                          ▼
-                    ┌─────────────┐
-                    │  MSK Kafka  │
-                    │  2 Topics   │
-                    └──────┬──────┘
-                           │
-         ┌─────────────────┴──────────────────┐
-         ▼                                    ▼
-  stream_app_logs.py                stream_clickstream.py
-  (Glue Streaming)                  (Glue Streaming)
-         │                                    │
-         │ DQ 校验                             │ DQ 校验
-         │                                    │
-    ┌────┴────┐                          ┌────┴────┐
-    ▼         ▼                          ▼         ▼
- Bronze    dead_letter/               Bronze    dead_letter/
- app_logs  (DQ失败>5%)              clickstream  (DQ失败>5%)
-    │                                    │
-    │ athena/ddl/                        │ athena/ddl/
-    │ bronze_clickstream.sql             │ bronze_clickstream.sql
-    │ (建表 SQL)                         │ (建表 SQL)
-    │                                    │
-    ▼                                    ▼
-  silver_parse_logs.py            silver_enrich_clicks.py
-  (每小时 Batch)                  (每小时 Batch)
-    │                                    │
-    ▼                                    ▼
- Silver                              Silver
- parsed_logs                       enriched_clicks
-    │                                    │
-    │                                    │ athena/views/
-    │                                    │ v_user_session.sql
-    │                                    ▼
-    │                              BI 漏斗分析
-    │
-    ├──→ gold_api_error_stats.py (每小时 Batch)
-    │         │
-    │         ▼
-    │    Gold api_error_stats
-    │         │
-    │         │ athena/views/
-    │         │ v_error_log_enriched.sql (JOIN Gold + Silver)
-    │         ▼
-    │    Agent Log Analyzer 查询
-    │
-    └──→ gold_incident_summary.py (每天 Batch)
-              │
-              ▼
-         Gold incident_summary
-              │
-              │ terraform/modules/vector_indexer/
-              │ (S3 Event → Lambda → Bedrock Embedding → S3 Vectors)
-              ▼
-         Agent 语义搜索历史相似事件
+          Producer (boto3 put_record_batch)
+                  │
+                  │ NDJSON (每条 + "\n")
+                  ▼
+        ┌───────────────────────────────────┐
+        │ Kinesis Data Firehose (Direct PUT)│
+        │   iodp-clickstream-{env}          │  $0.029/GB
+        │   iodp-app_logs-{env}             │  buffer 5MB / 60s, GZIP
+        └───────────────┬───────────────────┘
+                        │ dynamic partitioning
+                        ▼
+        s3://<bronze>/<stream>/year=YYYY/month=MM/day=DD/hour=HH/*.gz
+              │                                    │
+              │ (app_logs/...)                     │ (clickstream/...)
+              ▼                                    ▼
+      silver_parse_logs.py                 silver_enrich_clicks.py
+      (Glue Batch, manual)                 (Glue Batch, manual)
+              │  spark.read.json()                 │  spark.read.json()
+              │  + DQ + dedup + cast               │  + flatten + DQ + dedup + enrich
+              │                                    │
+         ┌────┴────┐                          ┌────┴────┐
+         ▼         ▼                          ▼         ▼
+      Silver    dead_letter/                Silver    dead_letter/
+      parsed    (DQ 失败 >5%)              enriched   (DQ 失败 >5%)
+      _logs                                _clicks
+         │                                       │
+         │                                       │ athena/views/v_user_session.sql
+         │                                       ▼
+         │                                  BI 漏斗分析
+         │
+         ├──→ gold_api_error_stats.py (Glue Batch, manual)
+         │          │
+         │          ▼
+         │     Gold api_error_stats
+         │          │
+         │          │ athena/views/v_error_log_enriched.sql (JOIN Gold + Silver)
+         │          ▼
+         │     Agent Log Analyzer 查询
+         │
+         └──→ gold_incident_summary.py (Glue Batch, manual)
+                   │
+                   ▼
+              Gold incident_summary
+                   │
+                   │ terraform/modules/vector_indexer/
+                   │ (S3 Event → Lambda → Bedrock Embedding → S3 Vectors)
+                   ▼
+              Agent 语义搜索历史相似事件
 
 
   dead_letter/ 重灌回路（手动）：
@@ -302,14 +277,14 @@ Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
 
   dead_letter/ ──Lambda──→ replay/ ──Glue Job──→ Bronze Iceberg
                                                       │
-                                               Silver Job 自动消费
+                                               Silver Job 重新消费
 
 
   terraform/modules/dynamodb/
   (元数据存储，贯穿全流程)
   ─────────────────────────────
-  • dq_reports：每次 DQ 校验写一条报告
-  • lineage_events：每个 Job 写一条血缘
+  • dq_reports        ：Silver Batch Job 每次 DQ 校验写一条报告
+  • lineage_events    ：每个 Job 写一条血缘
   • dq_threshold_config：运营动态调整 DQ 阈值
 ```
 
@@ -317,7 +292,11 @@ Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
 
 | 模块 | 管理什么 | 被谁用 | 何时触发 |
 |------|---------|--------|---------|
+| `storage` | 4 个 S3 桶（Bronze/Silver/Gold/Scripts） + 生命周期规则 | 所有数据层 | 总是 |
+| `ingestion` | 2 个 Firehose Delivery Stream（Direct PUT → Bronze） | Producer | 上游推数据时持续接收 |
+| `compute` | Glue Catalog + Glue 执行 Role + 5 个 Batch Job + 3 个 Trigger | Silver/Gold pipeline | 手动 `make demo-pipeline` 或 cron（如启用） |
 | `dynamodb` | 3 张 DynamoDB 元数据表 | 所有 Glue Job（写 DQ 报告 + 血缘）| 随 Job 运行自动写入 |
+| `observability` | SNS + Firehose DataFreshness 告警 + Glue 失败告警 + Dashboard | SRE | 异常发生时 |
 | `dlq_replay` | 1 个 Lambda + EventBridge | 运维手动 | CLI 调用或启用 EventBridge 规则 |
 | `replay_jobs` | 2 个 Glue Batch Job | 运维手动 | `aws glue start-job-run` |
 | `vector_indexer` | 1 个 Lambda + SQS DLQ + 告警 | S3 Event 自动触发 | Gold incident_summary 写入新 parquet 时 |

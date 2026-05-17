@@ -25,7 +25,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 VECTOR_BUCKET_NAME = os.environ["VECTOR_BUCKET_NAME"]
-INDEX_NAME         = os.environ.get("INDEX_NAME", "incident_solutions")
+INDEX_NAME         = os.environ.get("INDEX_NAME", "incident-solutions")
 BEDROCK_REGION     = os.environ.get("BEDROCK_REGION", "us-east-1")
 ENVIRONMENT        = os.environ.get("ENVIRONMENT", "prod")
 # put_vectors 单次最多 500 条，默认 50 安全

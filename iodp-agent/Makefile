@@ -17,9 +17,11 @@ TF_DIR           := terraform
 # 跨项目引用（项目一 BigData 的资源 ARN，部署前必须填写）
 BIGDATA_DQ_TABLE_ARN    ?= arn:aws:dynamodb:$(AWS_REGION):$(AWS_ACCOUNT_ID):table/iodp_dq_reports_$(ENV)
 BIGDATA_GOLD_BUCKET_ARN ?= arn:aws:s3:::iodp-gold-$(ENV)
-COGNITO_USER_POOL_ARN   ?= ""
+COGNITO_USER_POOL_ARN   ?=
 ATHENA_WORKGROUP        ?= primary
 ATHENA_RESULT_BUCKET    ?= s3://iodp-athena-results-$(ENV)/
+# LLM API key（DeepSeek / 通义 / 智谱 / OpenAI），从 shell env 读取避免硬编码
+LLM_API_KEY             ?= $(IODP_LLM_API_KEY)
 
 # Terraform 公共变量
 TF_VARS := -var='aws_region=$(AWS_REGION)' \
@@ -28,7 +30,8 @@ TF_VARS := -var='aws_region=$(AWS_REGION)' \
            -var='bigdata_gold_bucket_arn=$(BIGDATA_GOLD_BUCKET_ARN)' \
            -var='cognito_user_pool_arn=$(COGNITO_USER_POOL_ARN)' \
            -var='athena_workgroup=$(ATHENA_WORKGROUP)' \
-           -var='athena_result_bucket=$(ATHENA_RESULT_BUCKET)'
+           -var='athena_result_bucket=$(ATHENA_RESULT_BUCKET)' \
+           -var='llm_api_key=$(LLM_API_KEY)'
 
 # ──────────────────────────────────────────────────────────────
 # 检查必要工具
@@ -85,15 +88,25 @@ init: check-aws
 	@echo "=========================================="
 	@echo ""
 	@echo "🏗️  步骤 1/7: 初始化 Terraform..."
-	cd $(TF_DIR) && terraform init
+	@# backend.tf 现在显式 local，state 保留在 terraform.tfstate
+	@# 只清 .terraform 元数据（每次重 init 都安全），不再删 tfstate
+	@# 这样手动 terraform import 的 state 在跨次 make init 时仍然保留
+	rm -rf $(TF_DIR)/.terraform $(TF_DIR)/.terraform.lock.hcl
+	cd $(TF_DIR) && terraform init -reconfigure
 	@echo ""
 	@echo "🏗️  步骤 2/7: 创建 ECR 仓库..."
+	@# 幂等：ECR 仓库已在 AWS 存在但不在 state 里时，先 import 避免 RepositoryAlreadyExistsException
+	@if aws ecr describe-repositories --repository-names $(IMAGE_NAME) --region $(AWS_REGION) >/dev/null 2>&1; then \
+		echo "  ↪ ECR 仓库已存在于 AWS，检查 state..."; \
+		cd $(TF_DIR) && terraform state list aws_ecr_repository.agent >/dev/null 2>&1 \
+			|| terraform import $(TF_VARS) -var='lambda_image_uri=dummy' aws_ecr_repository.agent $(IMAGE_NAME); \
+	fi
 	cd $(TF_DIR) && terraform apply \
 		-target=aws_ecr_repository.agent \
 		$(TF_VARS) \
 		-var='lambda_image_uri=dummy' \
 		-auto-approve
-	@echo "✅ ECR 仓库已创建"
+	@echo "✅ ECR 仓库已就绪"
 	@echo ""
 	@echo "🔨 步骤 3/7: 构建 Docker 镜像..."
 	@$(MAKE) build-image
@@ -150,8 +163,11 @@ index-kb: check-aws
 # ──────────────────────────────────────────────────────────────
 build-frontend:
 	@echo "🎨 构建前端..."
-	$(eval API_URL := $(shell cd $(TF_DIR) && terraform output -raw api_endpoint 2>/dev/null))
+	$(eval API_URL := $(shell cd $(TF_DIR) && terraform output -raw api_endpoint 2>/dev/null | sed 's|/$$||'))
 	cd frontend && npm install && npm run build
+	@# App.jsx 用 window.__IODP_API_BASE__ 读 API URL — build 后注入到 dist/index.html
+	@echo "→ 注入 API_BASE=$(API_URL) 到 dist/index.html"
+	sed -i 's|</head>|<script>window.__IODP_API_BASE__="$(API_URL)";</script></head>|' frontend/dist/index.html
 	@echo "✅ 前端构建完成: frontend/dist/"
 
 # ──────────────────────────────────────────────────────────────
@@ -173,7 +189,13 @@ deploy-frontend: check-aws build-frontend
 # ──────────────────────────────────────────────────────────────
 deploy: check-aws build-image push-image
 	@echo ""
-	@echo "📦 更新 Lambda 函数..."
+	@echo "📦 terraform apply（同步 Lambda image + env vars，如 IODP_LLM_API_KEY 变化）..."
+	cd $(TF_DIR) && terraform apply \
+		$(TF_VARS) \
+		-var='lambda_image_uri=$(IMAGE_URI)' \
+		-auto-approve
+	@echo ""
+	@echo "📦 force update Lambda image（绕过 :latest tag 缓存）..."
 	aws lambda update-function-code \
 		--function-name $(PROJECT_NAME)-$(ENV) \
 		--image-uri $(IMAGE_URI) \

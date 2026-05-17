@@ -1,14 +1,16 @@
 # terraform/main.tf
 # 根模块，调用各子模块
 #
-# 模块依赖图：
-#   networking → streaming (需要 VPC/子网/SG)
-#   storage → compute (需要 bucket ARN/名称)
-#   streaming → compute (需要 MSK ARN/bootstrap)
-#   dynamodb → compute (需要 DQ/Lineage 表 ARN)
-#   compute + streaming → observability (需要 job 名称/集群名)
-#   observability → vector_indexer (需要 SNS topic ARN)
+# 架构（方案 D — Firehose 替代 MSK + Glue Streaming）：
+#   ingestion (Firehose) → storage (Bronze) → compute (Glue Batch, hourly) → Silver → Gold
+#   dynamodb → compute (DQ/Lineage 写入)
+#   compute → observability (Glue Job 指标)
+#   observability → vector_indexer (SNS topic 触发)
 #   storage + dynamodb → dlq_replay / replay_jobs
+#
+# 核心删减：
+#   - 删 networking 模块：无 VPC、无 NAT、无 IGW（Firehose 是托管公网服务）
+#   - 删 streaming 模块：无 MSK Serverless（Firehose Direct PUT 取代）
 
 terraform {
   required_version = ">= 1.6.0"
@@ -31,17 +33,8 @@ provider "aws" {
 data "aws_caller_identity" "current" {}
 
 # ════════════════════════════════════════════════════════════════
-#  核心基础设施模块
+#  存储 + DynamoDB
 # ════════════════════════════════════════════════════════════════
-
-module "networking" {
-  source = "./modules/networking"
-
-  environment        = var.environment
-  vpc_cidr           = var.vpc_cidr
-  availability_zones = var.availability_zones
-  tags               = local.mandatory_tags
-}
 
 module "storage" {
   source = "./modules/storage"
@@ -59,17 +52,6 @@ module "storage" {
   tags                    = local.mandatory_tags
 }
 
-module "streaming" {
-  source = "./modules/streaming"
-
-  environment        = var.environment
-  cluster_name       = "iodp-msk-${var.environment}"
-  subnet_ids         = module.networking.private_subnet_ids
-  security_group_ids = [module.networking.msk_sg_id]
-  kafka_topics       = var.kafka_topics
-  tags               = local.mandatory_tags
-}
-
 module "dynamodb" {
   source = "./modules/dynamodb"
 
@@ -78,7 +60,22 @@ module "dynamodb" {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  核心计算模块（依赖 storage + streaming + dynamodb）
+#  数据入口：Kinesis Data Firehose（Direct PUT → S3 Bronze）
+# ════════════════════════════════════════════════════════════════
+
+module "ingestion" {
+  source = "./modules/ingestion"
+
+  environment         = var.environment
+  bronze_bucket_arn   = module.storage.bronze_bucket_arn
+  streams             = var.firehose_streams
+  buffer_size_mb      = var.firehose_buffer_size_mb
+  buffer_interval_sec = var.firehose_buffer_interval_sec
+  tags                = local.mandatory_tags
+}
+
+# ════════════════════════════════════════════════════════════════
+#  核心计算（Glue Batch — Silver/Gold 转换）
 # ════════════════════════════════════════════════════════════════
 
 module "compute" {
@@ -92,8 +89,6 @@ module "compute" {
   gold_bucket_arn                = module.storage.gold_bucket_arn
   gold_bucket_name               = module.storage.gold_bucket_name
   scripts_bucket_name            = module.storage.scripts_bucket_name
-  msk_cluster_arn                = module.streaming.msk_cluster_arn
-  msk_bootstrap_brokers          = module.streaming.bootstrap_brokers_sasl_iam
   dq_reports_table_arn           = module.dynamodb.dq_reports_table_arn
   dq_reports_table_name          = module.dynamodb.dq_reports_table_name
   lineage_table_arn              = module.dynamodb.lineage_events_table_arn
@@ -106,18 +101,19 @@ module "compute" {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  监控模块（依赖 compute + streaming）
+#  可观测性（Glue Job 指标 + Firehose 指标）
 # ════════════════════════════════════════════════════════════════
 
 module "observability" {
   source = "./modules/observability"
 
-  environment           = var.environment
-  msk_cluster_name      = module.streaming.msk_cluster_name
-  glue_job_names        = module.compute.glue_job_names
-  dq_reports_table_name = module.dynamodb.dq_reports_table_name
-  alarm_email           = var.alarm_email
-  tags                  = local.mandatory_tags
+  environment              = var.environment
+  aws_region               = var.aws_region
+  glue_job_names           = module.compute.glue_job_names
+  firehose_stream_names    = module.ingestion.delivery_stream_names
+  dq_reports_table_name    = module.dynamodb.dq_reports_table_name
+  alarm_email              = var.alarm_email
+  tags                     = local.mandatory_tags
 }
 
 # ════════════════════════════════════════════════════════════════
@@ -142,8 +138,14 @@ module "replay_jobs" {
   tags               = local.mandatory_tags
 }
 
+# vector_indexer 依赖 iodp-agent 创建的 S3 Vectors bucket。
+# 部署顺序：
+#   1) 首次部署 bigdata 时 vector_bucket_arn 为空，本模块跳过（count = 0）
+#   2) 部署 iodp-agent 拿到 S3 Vectors bucket ARN
+#   3) 回填 dev.tfvars 的 vector_bucket_arn / vector_bucket_name，重 apply bigdata 即创建本模块
 module "vector_indexer" {
   source = "./modules/vector_indexer"
+  count  = var.vector_bucket_arn != "" ? 1 : 0
 
   environment         = var.environment
   aws_region          = var.aws_region

@@ -58,10 +58,19 @@ def execute_athena_query(
 
     client = boto3.client("athena", region_name=settings.aws_region)
 
+    # 兼容两种格式：
+    #   1) "iodp-agent-dev-athena-results"        （纯 bucket name）
+    #   2) "s3://iodp-agent-dev-athena-results/"  （完整 URL，env var 注入时通常是这格式）
+    # 之前直接 f"s3://{output_bucket}/..." 会拼成 "s3://s3://..."，Athena 报 InvalidBucketName。
+    if output_bucket.startswith("s3://"):
+        out_location = output_bucket.rstrip("/") + "/athena-results/"
+    else:
+        out_location = f"s3://{output_bucket.rstrip('/')}/athena-results/"
+
     response = client.start_query_execution(
         QueryString=sql,
         QueryExecutionContext={"Database": database},
-        ResultConfiguration={"OutputLocation": f"s3://{output_bucket}/athena-results/"},
+        ResultConfiguration={"OutputLocation": out_location},
         WorkGroup=workgroup,
     )
     query_execution_id = response["QueryExecutionId"]

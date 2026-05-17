@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.hourly_active_users (
 PARTITIONED BY (stat_date)
 LOCATION 's3://iodp-gold-${ENVIRONMENT}-${ACCOUNT_ID}/hourly_active_users/'
 TBLPROPERTIES (
-    'table_type'                        = 'ICEBERG',
-    'format'                            = 'parquet',
-    'write.parquet.compression-codec'   = 'snappy'
+    'table_type'        = 'ICEBERG',
+    'format'            = 'parquet',
+    'write_compression' = 'snappy'
 );

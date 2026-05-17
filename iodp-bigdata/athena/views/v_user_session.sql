@@ -2,7 +2,7 @@
 -- 用户会话视图：把同一 session_id 的行为序列聚合成一行
 -- 供 BI 工具分析用户路径和会话时长
 
-CREATE OR REPLACE VIEW iodp_silver_prod.v_user_session AS
+CREATE OR REPLACE VIEW iodp_silver_${ENVIRONMENT}.v_user_session AS
 SELECT
     session_id,
     user_id,
@@ -23,6 +23,6 @@ SELECT
     -- 购买总金额
     SUM(CASE WHEN event_type = 'purchase' THEN amount ELSE 0 END) AS total_purchase_amount,
     CAST(event_timestamp AS DATE)                               AS event_date
-FROM iodp_silver_prod.enriched_clicks
+FROM iodp_silver_${ENVIRONMENT}.enriched_clicks
 GROUP BY session_id, user_id, CAST(event_timestamp AS DATE)
 ;

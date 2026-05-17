@@ -2,7 +2,7 @@
 -- 供 Agent Log Analyzer 工具调用
 -- 输入参数：user_id (可选), time_start, time_end, service_name (可选)
 
-CREATE OR REPLACE VIEW iodp_gold_prod.v_error_log_enriched AS
+CREATE OR REPLACE VIEW iodp_gold_${ENVIRONMENT}.v_error_log_enriched AS
 SELECT
     aes.stat_hour,
     aes.service_name,
@@ -22,8 +22,8 @@ SELECT
     sl.stack_trace,
     sl.trace_id,
     sl.event_timestamp
-FROM iodp_gold_prod.api_error_stats   aes
-JOIN iodp_silver_prod.parsed_logs     sl
+FROM iodp_gold_${ENVIRONMENT}.api_error_stats   aes
+JOIN iodp_silver_${ENVIRONMENT}.parsed_logs     sl
   ON  aes.service_name = sl.service_name
   AND aes.stat_hour    = DATE_TRUNC('hour', sl.event_timestamp)
   AND aes.error_code   = sl.error_code

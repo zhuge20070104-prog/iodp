@@ -25,9 +25,7 @@ CREATE TABLE IF NOT EXISTS iodp_silver_${ENVIRONMENT}.enriched_clicks (
 PARTITIONED BY (event_date, event_type)
 LOCATION 's3://iodp-silver-${ENVIRONMENT}-${ACCOUNT_ID}/enriched_clicks/'
 TBLPROPERTIES (
-    'table_type'                        = 'ICEBERG',
-    'format'                            = 'parquet',
-    'write.parquet.compression-codec'   = 'snappy',
-    'write.delete.mode'                 = 'merge-on-read',
-    'write.update.mode'                 = 'merge-on-read'
+    'table_type'        = 'ICEBERG',
+    'format'            = 'parquet',
+    'write_compression' = 'snappy'
 );

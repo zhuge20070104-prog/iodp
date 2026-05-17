@@ -106,9 +106,8 @@ resource "aws_lambda_function" "vector_indexer" {
   filename         = local.zip_path
   source_code_hash = fileexists(local.zip_path) ? filebase64sha256(local.zip_path) : null
 
-  # S3 Vectors 是 storage-first 架构，写入限速远比 OpenSearch Serverless 宽松，
-  # 但仍保留 reserved concurrency 以控制 Bedrock embedding 调用费率
-  reserved_concurrent_executions = 2
+  # 不设 reserved_concurrent_executions：新 AWS 账户 Lambda unreserved 配额默认只有 10，
+  # 占用 reserved 会让剩余低于最低 10 限制。配额提升后再恢复（建议值 2 控制 Bedrock 调用费率）。
 
   dead_letter_config {
     target_arn = aws_sqs_queue.indexer_dlq.arn

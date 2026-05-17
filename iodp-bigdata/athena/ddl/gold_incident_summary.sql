@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.incident_summary (
 PARTITIONED BY (stat_date)
 LOCATION 's3://iodp-gold-${ENVIRONMENT}-${ACCOUNT_ID}/incident_summary/'
 TBLPROPERTIES (
-    'table_type'                        = 'ICEBERG',
-    'format'                            = 'parquet',
-    'write.parquet.compression-codec'   = 'snappy'
+    'table_type'        = 'ICEBERG',
+    'format'            = 'parquet',
+    'write_compression' = 'snappy'
 );

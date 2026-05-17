@@ -14,7 +14,7 @@ output "vector_bucket_name" {
 
 output "vector_bucket_arn" {
   description = "S3 Vectors bucket ARN (paste into iodp-bigdata tfvars as vector_bucket_arn)"
-  value       = aws_s3vectors_vector_bucket.rag.arn
+  value       = aws_s3vectors_vector_bucket.rag.vector_bucket_arn
 }
 
 output "vector_index_incident_solutions" {

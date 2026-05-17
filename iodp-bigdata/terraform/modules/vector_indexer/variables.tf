@@ -23,9 +23,9 @@ variable "vector_bucket_arn" {
 }
 
 variable "vector_index_name" {
-  description = "S3 Vectors index name (default: incident_solutions)"
+  description = "S3 Vectors index name (default: incident-solutions)"
   type        = string
-  default     = "incident_solutions"
+  default     = "incident-solutions"
 }
 
 variable "sns_alert_topic_arn" {

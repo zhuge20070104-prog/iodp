@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS iodp_gold_${ENVIRONMENT}.api_error_stats (
 PARTITIONED BY (stat_date, service_name)
 LOCATION 's3://iodp-gold-${ENVIRONMENT}-${ACCOUNT_ID}/api_error_stats/'
 TBLPROPERTIES (
-    'table_type'                        = 'ICEBERG',
-    'format'                            = 'parquet',
-    'write.parquet.compression-codec'   = 'snappy'
+    'table_type'        = 'ICEBERG',
+    'format'            = 'parquet',
+    'write_compression' = 'snappy'
 );

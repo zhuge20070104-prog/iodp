@@ -18,7 +18,7 @@ def query_dq_reports(
     time_start: str,
     time_end: str,
     dynamodb_table: str = "",
-    aws_region: str = "us-east-1",
+    aws_region: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
     查询指定表在指定时段内是否有 DQ 阈值突破的告警记录。
@@ -26,9 +26,11 @@ def query_dq_reports(
 
     table_name:  Bronze 表名，如 "bronze_app_logs"
     time_start/end: ISO 格式时间字符串
+    aws_region: 留空时用 settings.aws_region（避免默认 us-east-1 跟实际表 region 不一致）
     """
     ddb_table_name = dynamodb_table or settings.dq_reports_table
-    dynamodb = boto3.resource("dynamodb", region_name=aws_region)
+    region = aws_region or settings.aws_region
+    dynamodb = boto3.resource("dynamodb", region_name=region)
     table = dynamodb.Table(ddb_table_name)
 
     try:

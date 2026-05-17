@@ -102,6 +102,6 @@ resource "aws_dynamodb_table" "agent_jobs" {
   server_side_encryption  { enabled = true }
 
   tags = merge(var.tags, {
-    Purpose = "Async diagnosis job tracking (POST /diagnose → GET /diagnose/{job_id})"
+    Purpose = "Async diagnosis job tracking - POST /diagnose then GET /diagnose/job_id"
   })
 }

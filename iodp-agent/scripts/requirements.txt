@@ -1,0 +1,13 @@
+# iodp-agent/scripts/ 离线脚本依赖
+# 安装：pip3 install -r scripts/requirements.txt
+#
+# 注：seed_test_data.py 和 index_knowledge_base.py 都用了 awswrangler + openai SDK。
+
+awswrangler>=3.0.0
+
+# S3 Vectors 在 boto3 1.40+ 才有 client；awswrangler 默认可能拉旧版 boto3，显式锁
+boto3>=1.40.0
+botocore>=1.40.0
+
+# index_knowledge_base.py 调 qwen embedding（OpenAI 兼容 API）
+openai>=1.40.0

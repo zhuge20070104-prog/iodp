@@ -1,12 +1,11 @@
 # terraform/modules/compute/main.tf
-# Glue Jobs、Glue Catalog、IAM Roles
+# Glue Jobs（Batch only）、Glue Catalog、IAM Roles
 #
-# 设计：
-#   - 统一 IAM Role 供所有核心 Glue Job 使用（最小权限：S3 + MSK + DynamoDB + Catalog）
-#   - Glue Data Catalog 三个 Database 对应 Medallion 三层
-#   - 2 个 Streaming Job（clickstream + app_logs）
-#   - 5 个 Batch Job（Silver × 2 + Gold × 3）
-#   - Trigger：流式常驻运行；批处理按小时 / 每天调度
+# 方案 D 调整：
+#   - 删除 2 个 Glue Streaming Job（Firehose 已直接落 Bronze）
+#   - 删除 MSK IAM 权限
+#   - 保留 5 个 Batch Job（Silver × 2 + Gold × 3）
+#   - Trigger 默认关闭（手动模式，FinOps）
 
 # ─── Glue IAM Role ───
 resource "aws_iam_role" "glue_execution" {
@@ -44,17 +43,6 @@ resource "aws_iam_role_policy" "glue_execution_policy" {
         ]
       },
       {
-        Sid    = "MSKIAMAuth"
-        Effect = "Allow"
-        Action = [
-          "kafka-cluster:Connect", "kafka-cluster:ReadGroup",
-          "kafka-cluster:DescribeGroup", "kafka-cluster:AlterGroup",
-          "kafka-cluster:DescribeTopic", "kafka-cluster:ReadData",
-          "kafka:GetBootstrapBrokers", "kafka:DescribeClusterV2"
-        ]
-        Resource = [var.msk_cluster_arn, "${var.msk_cluster_arn}/*"]
-      },
-      {
         Sid    = "DynamoDBWriteDQAndLineage"
         Effect = "Allow"
         Action = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem", "dynamodb:Query"]
@@ -84,97 +72,24 @@ resource "aws_iam_role_policy" "glue_execution_policy" {
 }
 
 # ─── Glue Data Catalog Databases ───
+# 显式传 tags 绕开 AWS provider v5 + default_tags 在 Glue Catalog Database 上的
+# "Provider produced inconsistent final plan / tags_all" bug。
 resource "aws_glue_catalog_database" "bronze" {
   name        = "iodp_bronze_${var.environment}"
-  description = "IODP Bronze Layer - Raw ingested data"
+  description = "IODP Bronze Layer - Raw ingested data (Firehose GZip JSON)"
+  tags        = var.tags
 }
 
 resource "aws_glue_catalog_database" "silver" {
   name        = "iodp_silver_${var.environment}"
   description = "IODP Silver Layer - Cleaned and enriched data"
+  tags        = var.tags
 }
 
 resource "aws_glue_catalog_database" "gold" {
   name        = "iodp_gold_${var.environment}"
   description = "IODP Gold Layer - Business aggregates, consumed by Agent"
-}
-
-# ════════════════════════════════════════════════════════════════
-#  Streaming Jobs（常驻运行，消费 MSK Topic）
-# ════════════════════════════════════════════════════════════════
-
-resource "aws_glue_job" "stream_clickstream" {
-  name     = "iodp-stream-clickstream-${var.environment}"
-  role_arn = aws_iam_role.glue_execution.arn
-
-  command {
-    name            = "gluestreaming"
-    script_location = "s3://${var.scripts_bucket_name}/streaming/stream_clickstream.py"
-    python_version  = "3"
-  }
-
-  glue_version      = "4.0"
-  number_of_workers = 2       # FinOps: 最小化初始 Worker 数
-  worker_type       = "G.1X"  # FinOps: G.1X 适合流式小作业
-
-  default_arguments = {
-    "--enable-auto-scaling"              = "true"
-    "--enable-metrics"                   = "true"
-    "--enable-continuous-cloudwatch-log" = "true"
-    "--enable-spark-ui"                  = "true"
-    "--TempDir"                          = "s3://${var.scripts_bucket_name}/tmp/"
-    "--job-bookmark-option"              = "job-bookmark-enable"
-    "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
-    "--MSK_BOOTSTRAP_SERVERS"            = var.msk_bootstrap_brokers
-    "--BRONZE_BUCKET"                    = "s3://${var.bronze_bucket_name}/"
-    "--DQ_TABLE"                         = var.dq_reports_table_name
-    "--LINEAGE_TABLE"                    = var.lineage_table_name
-    "--DQ_THRESHOLD_TABLE"               = var.dq_threshold_config_table_name
-    "--ENVIRONMENT"                      = var.environment
-  }
-
-  execution_property {
-    max_concurrent_runs = 1
-  }
-
-  tags = var.tags
-}
-
-resource "aws_glue_job" "stream_app_logs" {
-  name     = "iodp-stream-app-logs-${var.environment}"
-  role_arn = aws_iam_role.glue_execution.arn
-
-  command {
-    name            = "gluestreaming"
-    script_location = "s3://${var.scripts_bucket_name}/streaming/stream_app_logs.py"
-    python_version  = "3"
-  }
-
-  glue_version      = "4.0"
-  number_of_workers = 2
-  worker_type       = "G.1X"
-
-  default_arguments = {
-    "--enable-auto-scaling"              = "true"
-    "--enable-metrics"                   = "true"
-    "--enable-continuous-cloudwatch-log" = "true"
-    "--enable-spark-ui"                  = "true"
-    "--TempDir"                          = "s3://${var.scripts_bucket_name}/tmp/"
-    "--job-bookmark-option"              = "job-bookmark-enable"
-    "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
-    "--MSK_BOOTSTRAP_SERVERS"            = var.msk_bootstrap_brokers
-    "--BRONZE_BUCKET"                    = "s3://${var.bronze_bucket_name}/"
-    "--DQ_TABLE"                         = var.dq_reports_table_name
-    "--LINEAGE_TABLE"                    = var.lineage_table_name
-    "--DQ_THRESHOLD_TABLE"               = var.dq_threshold_config_table_name
-    "--ENVIRONMENT"                      = var.environment
-  }
-
-  execution_property {
-    max_concurrent_runs = 1
-  }
-
-  tags = var.tags
+  tags        = var.tags
 }
 
 # ════════════════════════════════════════════════════════════════
@@ -202,6 +117,7 @@ resource "aws_glue_job" "silver_enrich_clicks" {
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
     "--BRONZE_BUCKET"                    = "s3://${var.bronze_bucket_name}/"
+    "--BRONZE_PREFIX"                    = "clickstream/"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
     "--LINEAGE_TABLE"                    = var.lineage_table_name
     "--DQ_TABLE"                         = var.dq_reports_table_name
@@ -235,6 +151,7 @@ resource "aws_glue_job" "silver_parse_logs" {
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
     "--BRONZE_BUCKET"                    = "s3://${var.bronze_bucket_name}/"
+    "--BRONZE_PREFIX"                    = "app_logs/"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
     "--LINEAGE_TABLE"                    = var.lineage_table_name
     "--DQ_TABLE"                         = var.dq_reports_table_name
@@ -343,14 +260,14 @@ resource "aws_glue_job" "gold_incident_summary" {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  Glue Triggers（定时调度）
+#  Glue Triggers（定时调度，默认关闭 — FinOps 手动模式）
 # ════════════════════════════════════════════════════════════════
 
 # Silver 层：每小时运行
 resource "aws_glue_trigger" "silver_hourly" {
   name     = "iodp-silver-hourly-trigger-${var.environment}"
   type     = "SCHEDULED"
-  schedule = "cron(5 * * * ? *)"   # 每小时第 5 分钟（避免与整点冲突）
+  schedule = "cron(5 * * * ? *)"   # 每小时第 5 分钟
   enabled  = var.triggers_enabled
 
   actions {
@@ -384,7 +301,7 @@ resource "aws_glue_trigger" "gold_hourly" {
 resource "aws_glue_trigger" "gold_daily" {
   name     = "iodp-gold-daily-trigger-${var.environment}"
   type     = "SCHEDULED"
-  schedule = "cron(0 2 * * ? *)"   # UTC 02:00（北京时间 10:00）
+  schedule = "cron(0 2 * * ? *)"   # UTC 02:00
   enabled  = var.triggers_enabled
 
   actions {

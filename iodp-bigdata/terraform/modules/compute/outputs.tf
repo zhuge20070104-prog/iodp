@@ -5,8 +5,6 @@ output "glue_execution_role_arn" {
 output "glue_job_names" {
   description = "All Glue job names (for observability module alarm setup)"
   value = [
-    aws_glue_job.stream_clickstream.name,
-    aws_glue_job.stream_app_logs.name,
     aws_glue_job.silver_enrich_clicks.name,
     aws_glue_job.silver_parse_logs.name,
     aws_glue_job.gold_hourly_active_users.name,
