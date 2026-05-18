@@ -240,19 +240,9 @@ resource "aws_iam_role_policy" "lambda_app" {
           "arn:aws:s3:::iodp-silver-${var.environment}-*/*",
         ]
       },
-      {
-        Sid      = "BedrockInvoke"
-        Effect   = "Allow"
-        Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-        # 三类 ARN：
-        # 1. foundation-model/* — Cohere embedding 直调 + inference profile 底层调到的模型
-        # 2. inference-profile/* — global.* / apac.* 跨区调用的入口
-        # 3. 所有 region (*) — global.* 会自动路由到任何 region 的 foundation model
-        Resource = [
-          "arn:aws:bedrock:*::foundation-model/*",
-          "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/*",
-        ]
-      },
+      # BedrockInvoke 已删除：项目从 Bedrock Claude 切到 DashScope Qwen 后这条权限
+      # 不再需要。LLM 调用走 https://dashscope.aliyuncs.com（公网，不经 AWS IAM），
+      # API key 通过 IODP_LLM_API_KEY 环境变量注入。
       {
         Sid    = "S3VectorsAccess"
         Effect = "Allow"
@@ -267,6 +257,16 @@ resource "aws_iam_role_policy" "lambda_app" {
           aws_s3vectors_vector_bucket.rag.vector_bucket_arn,
           "${aws_s3vectors_vector_bucket.rag.vector_bucket_arn}/index/*",
         ]
+      },
+      {
+        # Lambda 自调用：POST /diagnose 用 lambda.invoke(InvocationType='Event')
+        # 异步触发同一函数跑 LangGraph，绕开 Mangum + BackgroundTasks 等齐才返回的坑。
+        # 用 local.name_prefix 构造 ARN 避免与 aws_lambda_function 形成循环依赖
+        # （Lambda 的 role 在 Lambda 创建前必须存在）。
+        Sid      = "LambdaSelfInvoke"
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}"
       },
     ]
   })

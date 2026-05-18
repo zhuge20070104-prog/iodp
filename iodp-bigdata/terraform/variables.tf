@@ -76,6 +76,13 @@ variable "vector_bucket_arn" {
   default     = ""
 }
 
+variable "llm_api_key" {
+  description = "DashScope (Qwen) API key for OpenAI-compatible embedding endpoint. 给 vector_indexer Lambda 用，与 iodp-agent Lambda 共用同一 key。"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "vector_index_name" {
   description = "S3 Vectors index name written by the indexer Lambda"
   type        = string

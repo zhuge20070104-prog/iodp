@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two sibling projects deployed in sequence, with the root `Makefile` orchestrating cross-project ARN passing:
 
 - `iodp-bigdata/` — Serverless Medallion data lake (Firehose → S3 Bronze/Silver/Gold Iceberg → Athena). Produces the data and the ARNs that the agent consumes.
-- `iodp-agent/` — Multi-agent diagnostic system (FastAPI + LangGraph on Lambda, Bedrock Claude, S3 Vectors RAG). Consumes BigData's Athena views, DynamoDB DQ reports, and S3 Vectors indexes.
+- `iodp-agent/` — Multi-agent diagnostic system (FastAPI + LangGraph on Lambda, DashScope Qwen via OpenAI-compatible API, S3 Vectors RAG). Consumes BigData's Athena views, DynamoDB DQ reports, and S3 Vectors indexes.
 
 **Deploy order is load-bearing**: BigData must exist before Agent, because root `make init-agent` reads BigData's `terraform output` for `dq_reports_table_arn`, `gold_bucket_arn`, `athena_workgroup`, `athena_result_bucket` and injects them as TF vars into the agent project. Destroy order is reversed (agent first, then bigdata).
 
@@ -103,9 +103,9 @@ The agent **does not** import bigdata code. The contract between them is purely 
   ```
   `reply_agent` and `bug_report_agent` run in parallel after `rag_agent`; the merge happens in `merge_synthesizer`.
 - **Multi-turn conversations** are persisted via the DynamoDB LangGraph checkpointer keyed on `thread_id`. One `thread_id` produces many `job_id`s (each user message = one job).
-- **Dual-model routing for FinOps**: complex reasoning nodes (`log_analyzer`, `bug_report`) use Sonnet 3.5; simple nodes (`router`, `rag`, `reply`) use Haiku 3.5. Configured in `src/config.py` (`bedrock_reasoning_model_id` / `bedrock_router_model_id`). Prompt caching is on by default (`bedrock_prompt_cache_enabled=True`) — SystemMessages are emitted as list-of-blocks with `cache_control={"type":"ephemeral"}`.
+- **Dual-model routing for FinOps**: complex reasoning nodes (`log_analyzer`, `bug_report`) use `qwen-max`; simple nodes (`router`, `rag`, `reply`) use `qwen-turbo`. Configured in `src/config.py` (`llm_reasoning_model` / `llm_router_model`). LLM is reached via OpenAI-compatible API at `dashscope.aliyuncs.com/compatible-mode/v1`; the project switched off Bedrock because the AWS account is China-registered and can't get Bedrock allowlisting.
 - **Three DynamoDB tables**: `iodp-agent-state-{env}` (checkpointer, 7d TTL), `iodp-bug-tickets-{env}` (bug reports + severity GSI), `iodp-agent-jobs-{env}` (async job tracking, 1h TTL, GSI on thread_id).
-- **RAG is S3 Vectors, not OpenSearch**. Replaced OpenSearch Serverless in Dec 2025 for ~90% cost savings. `boto3>=1.40` ships the `s3vectors` client; embedding goes through Bedrock Titan.
+- **RAG is S3 Vectors, not OpenSearch**. Replaced OpenSearch Serverless in Dec 2025 for ~90% cost savings. `boto3>=1.40` ships the `s3vectors` client; embedding goes through DashScope `text-embedding-v3` (same key as chat).
 - **Settings precedence**: Pydantic `BaseSettings` with `env_prefix="IODP_"`. Override anything at runtime via env var (e.g. `IODP_MAX_CLARIFICATION_ITERATIONS=5`).
 
 ## Cross-project gotchas
@@ -113,7 +113,7 @@ The agent **does not** import bigdata code. The contract between them is purely 
 - After running `make destroy` in `iodp-bigdata`, the agent's Lambda still has the old DQ table / Gold bucket ARNs baked into its env vars. Re-run `make init` from the root (or `make destroy && make init`) to repair the wiring.
 - The root `make init-agent` falls back to *constructed* ARN strings (e.g. `arn:aws:dynamodb:...:table/iodp_dq_reports_${ENV}`) when `terraform output` returns nothing. If you're deploying the agent without an actual bigdata stack, those fallback ARNs point to nothing — log_analyzer queries will fail at runtime, not at deploy.
 - Glue scripts must be uploaded to S3 *before* `make init` in bigdata if the scripts bucket already exists from a prior run — use `bash scripts/upload_glue_scripts.sh dev`.
-- Cost reminder embedded in the Makefiles: enabling Glue triggers costs ~$35/wk; S3 Vectors is near-free at rest; Lambda + Bedrock are pay-per-invoke. The deliberate default is "everything off until you demo."
+- Cost reminder embedded in the Makefiles: enabling Glue triggers costs ~$35/wk; S3 Vectors is near-free at rest; Lambda + DashScope are pay-per-invoke (Qwen 按 token 计费，比 Bedrock Claude 便宜 ~80%). The deliberate default is "everything off until you demo."
 
 ## Shell environment
 

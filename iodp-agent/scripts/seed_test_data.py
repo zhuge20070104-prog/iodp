@@ -4,8 +4,20 @@
 在 dev 环境向 Athena（通过 S3 Parquet）和 DynamoDB 写入固定测试数据，
 使 Agent 集成测试有确定性结果可断言。
 
+两种模式：
+  --mode full      （默认）直接把 Silver parsed_logs + Gold api_error_stats +
+                   incident_summary + DQ reports 全部 mock 写入。
+                   适合：跳过 bigdata Glue 流水线的快速 CI / 本地集成测试。
+                   耗时 ~30s，零 Glue 成本。
+
+  --mode rag-only  只 mock incident_summary（RAG 知识库源）+ DQ reports。
+                   适合：搭配 bigdata `make seed-production`：Silver/Gold 由真实
+                   Glue 流水线产生，incident_summary 因依赖 24h 累积数据无法走
+                   流水线，DQ reports 因 demo 数据量小不一定触发阈值，靠本模式补齐。
+
 运行方式：
-  python scripts/seed_test_data.py --env dev
+  python scripts/seed_test_data.py --env dev --mode full
+  python scripts/seed_test_data.py --env dev --mode rag-only
 """
 
 import argparse
@@ -24,10 +36,14 @@ _RUN_ID = uuid.uuid4().hex[:8]
 parser = argparse.ArgumentParser()
 parser.add_argument("--env",    default="dev",        help="目标环境 dev|staging")
 parser.add_argument("--region", default="us-east-1")
+parser.add_argument("--mode",   default="full", choices=["full", "rag-only"],
+                    help="full=全部 mock（默认）; rag-only=仅 incident_summary+DQ "
+                         "（搭配 bigdata 真实 Glue 流水线使用）")
 args_cli = parser.parse_args()
 
 ENV    = args_cli.env
 REGION = args_cli.region
+MODE   = args_cli.mode
 
 assert ENV in ("dev", "staging"), "只允许在 dev/staging 注入测试数据"
 
@@ -219,6 +235,85 @@ def seed_gold_incident_summary():
             "environment":          ENV,
             "stat_date":            (yesterday_22 - timedelta(days=68)).date().isoformat(),
         },
+        # ─── 以下 4 条覆盖 producer pool 里剩余的 error_code ───
+        # 之前只 seed 了 E2001/E2003/E5001，但 producer 随机抽到 E2002/E1xxx/E3xxx/
+        # E4xxx 时 RAG filter_error_codes 精确匹配 → 0 命中。这 4 条把主要类别都覆盖。
+        {
+            "incident_id":          "INC-2026-05-10-payment-E2002",
+            "title":                "支付下游超时雪崩 E2002",
+            "service_name":         "payment-service",
+            "error_codes":          json.dumps(["E2002"]),
+            "severity":             "P2",
+            "start_time":           (yesterday_22 - timedelta(days=8)).isoformat(),
+            "end_time":             (yesterday_22 - timedelta(days=8) + timedelta(minutes=35)).isoformat(),
+            "peak_error_rate":      0.12,
+            "total_affected_users": 420,
+            "peak_p99_ms":          3200.0,
+            "symptoms":             "用户支付页面卡在加载中，最终提示 'Downstream timeout while calling backend'；payment-service 日志显示调用 risk-control 服务超时",
+            "root_cause":           "风控服务 risk-control 单实例 CPU 打满（新模型上线后推理耗时 200ms→1.2s），payment-service 同步调用阻塞累积",
+            "resolution":           "risk-control 横向扩容 2→6 实例；payment-service 调风控加 800ms timeout + fallback 跳过风控（事后异步审计）；新增 risk-control p99 > 500ms 告警",
+            "resolved_at":          (yesterday_22 - timedelta(days=8) + timedelta(hours=1)).isoformat(),
+            "sample_traces":        json.dumps(["trace-hist-0030", "trace-hist-0031"]),
+            "environment":          ENV,
+            "stat_date":            (yesterday_22 - timedelta(days=8)).date().isoformat(),
+        },
+        {
+            "incident_id":          "INC-2026-04-15-auth-E1001",
+            "title":                "登录大面积失败 E1001",
+            "service_name":         "auth-service",
+            "error_codes":          json.dumps(["E1001"]),
+            "severity":             "P1",
+            "start_time":           (yesterday_22 - timedelta(days=33)).isoformat(),
+            "end_time":             (yesterday_22 - timedelta(days=33) + timedelta(minutes=50)).isoformat(),
+            "peak_error_rate":      0.55,
+            "total_affected_users": 3800,
+            "peak_p99_ms":          1500.0,
+            "symptoms":             "用户登录提示账号密码错误但凭证正确；auth-service 日志显示 Redis token 校验 E1001",
+            "root_cause":           "Redis 集群主节点 failover，新主节点未同步全部 session（异步复制延迟 2s），用户带旧 token 来校验时找不到",
+            "resolution":           "Redis 切换到半同步复制；auth-service token 校验失败时降级查 DynamoDB；前端 401 时自动触发一次 silent re-login",
+            "resolved_at":          (yesterday_22 - timedelta(days=33) + timedelta(hours=2)).isoformat(),
+            "sample_traces":        json.dumps(["trace-hist-0040"]),
+            "environment":          ENV,
+            "stat_date":            (yesterday_22 - timedelta(days=33)).date().isoformat(),
+        },
+        {
+            "incident_id":          "INC-2026-02-20-gateway-E3001",
+            "title":                "API Gateway 大面积超时 E3001",
+            "service_name":         "api-gateway",
+            "error_codes":          json.dumps(["E3001"]),
+            "severity":             "P1",
+            "start_time":           (yesterday_22 - timedelta(days=87)).isoformat(),
+            "end_time":             (yesterday_22 - timedelta(days=87) + timedelta(hours=1, minutes=10)).isoformat(),
+            "peak_error_rate":      0.38,
+            "total_affected_users": 5600,
+            "peak_p99_ms":          29800.0,
+            "symptoms":             "全站 API 响应慢甚至 504；api-gateway 日志显示上游 connection refused E3001",
+            "root_cause":           "下游 product-service 一个新部署的版本内存泄漏，pod 频繁 OOMKilled 重启，连接池被打满",
+            "resolution":           "product-service 回滚到上一个稳定版本；新增内存使用率 > 80% 持续 5 分钟告警；CI 加 heap profile diff 检查",
+            "resolved_at":          (yesterday_22 - timedelta(days=87) + timedelta(hours=2)).isoformat(),
+            "sample_traces":        json.dumps(["trace-hist-0050"]),
+            "environment":          ENV,
+            "stat_date":            (yesterday_22 - timedelta(days=87)).date().isoformat(),
+        },
+        {
+            "incident_id":          "INC-2026-05-02-order-E4001",
+            "title":                "订单状态机错乱 E4001",
+            "service_name":         "order-service",
+            "error_codes":          json.dumps(["E4001"]),
+            "severity":             "P2",
+            "start_time":           (yesterday_22 - timedelta(days=16)).isoformat(),
+            "end_time":             (yesterday_22 - timedelta(days=16) + timedelta(minutes=25)).isoformat(),
+            "peak_error_rate":      0.06,
+            "total_affected_users": 180,
+            "peak_p99_ms":          600.0,
+            "symptoms":             "用户已支付的订单显示 '待支付'，再次支付报错 E4001 'invalid order state transition'",
+            "root_cause":           "支付成功回调和用户主动查询订单状态走两条路径，并发写订单状态时无版本号控制，发生 lost update",
+            "resolution":           "order_status 字段加 version 列 + CAS 更新；回调与查询统一走 saga；新增订单状态变更审计日志",
+            "resolved_at":          (yesterday_22 - timedelta(days=16) + timedelta(hours=1, minutes=30)).isoformat(),
+            "sample_traces":        json.dumps(["trace-hist-0060"]),
+            "environment":          ENV,
+            "stat_date":            (yesterday_22 - timedelta(days=16)).date().isoformat(),
+        },
     ]
     df = pd.DataFrame(rows)
     # incident_summary DDL 里 stat_date 是 STRING（不是 DATE）。但 awswrangler 看到
@@ -238,9 +333,19 @@ def seed_gold_incident_summary():
 
 
 if __name__ == "__main__":
-    print(f"Seeding test data into env={ENV}, region={REGION}")
-    seed_gold_api_error_stats()
-    seed_silver_parsed_logs()
-    seed_dq_reports()
-    seed_gold_incident_summary()
+    print(f"Seeding test data into env={ENV}, region={REGION}, mode={MODE}")
+    if MODE == "full":
+        # 跳过 bigdata 真实 Glue 流水线，所有数据都 mock 直写
+        seed_gold_api_error_stats()
+        seed_silver_parsed_logs()
+        seed_dq_reports()
+        seed_gold_incident_summary()
+    else:  # rag-only
+        # 搭配 bigdata `make seed-production` 使用：
+        # Silver parsed_logs + Gold api_error_stats 已由真实 Glue 流水线产生，
+        # 这里只补 Glue 跑不出来的两份数据：
+        #   - incident_summary：需 24h 累积数据，demo 内攒不出来
+        #   - dq_reports：demo 数据量小，DQ 阈值可能不触发
+        seed_dq_reports()
+        seed_gold_incident_summary()
     print("Done. Integration tests can now run against deterministic data.")

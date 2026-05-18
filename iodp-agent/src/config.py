@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Athena
     athena_result_bucket: str = "iodp-athena-results-prod"
     athena_workgroup: str = "primary"
-    # 新增：限制 Athena 结果行数，防止超大结果集撑爆 AgentState 和 Bedrock Token
+    # 新增：限制 Athena 结果行数，防止超大结果集撑爆 AgentState 和 LLM context window
     athena_max_rows: int = 50
 
     # DynamoDB
@@ -51,12 +51,6 @@ class Settings(BaseSettings):
     embedding_api_key:    str = ""                      # 留空 = 复用 llm_api_key
     embedding_model:      str = "text-embedding-v3"     # qwen v3，输出 1024 维
     embedding_dimensions: int = 1024                    # 跟 S3 Vectors index dimension 必须一致
-
-    # ↓ 旧 Bedrock 字段保留为别名避免历史代码 AttributeError，已废弃不再读取
-    bedrock_reasoning_model_id:   str = ""
-    bedrock_router_model_id:      str = ""
-    bedrock_model_id:             str = ""
-    bedrock_prompt_cache_enabled: bool = False
 
     # 环境
     environment: str = "prod"

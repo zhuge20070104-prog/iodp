@@ -28,10 +28,21 @@ from pyspark.sql.functions import (
     sum as spark_sum, when,
 )
 
+from lib.iceberg_utils import configure_iceberg, iceberg_merge_upsert
+
 args = getResolvedOptions(sys.argv, [
     "JOB_NAME", "SILVER_BUCKET", "GOLD_BUCKET",
     "ENVIRONMENT", "GLUE_DATABASE_SILVER", "GLUE_DATABASE_GOLD",
 ])
+
+
+def _get_optional_arg(name):
+    """getResolvedOptions 会因缺参直接抛异常；用这个包一层做可选参数。"""
+    try:
+        return getResolvedOptions(sys.argv, [name])[name]
+    except Exception:
+        return None
+
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -39,10 +50,21 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args["JOB_NAME"], args)
 
-# 计算处理窗口：上一个完整小时
-now_utc = datetime.now(timezone.utc)
-processing_hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
-processing_hour_start = processing_hour_end - timedelta(hours=1)
+# 注册 glue_catalog（其他 6 个 batch job 都调了，唯独这里之前漏了，导致
+# spark.read.format("iceberg").load("glue_catalog.x.y") 时 catalog 未注册，
+# Iceberg 掉回 Hive Metastore，报 None.get / MissingTableException: VERSION）
+configure_iceberg(spark, args["GOLD_BUCKET"])
+
+# 计算处理窗口（cron 默认上一小时；--TARGET_HOUR=YYYY-MM-DD-HH UTC 覆盖）
+target_hour_str = _get_optional_arg("TARGET_HOUR")
+if target_hour_str:
+    processing_hour_start = datetime.strptime(target_hour_str, "%Y-%m-%d-%H").replace(tzinfo=timezone.utc)
+    processing_hour_end   = processing_hour_start + timedelta(hours=1)
+    print(f"TARGET_HOUR override: {processing_hour_start.isoformat()}")
+else:
+    now_utc = datetime.now(timezone.utc)
+    processing_hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
+    processing_hour_start = processing_hour_end - timedelta(hours=1)
 
 print(f"Processing window: {processing_hour_start} ~ {processing_hour_end}")
 
@@ -95,14 +117,18 @@ gold_df = error_stats_df.join(
     "environment", lit(args["ENVIRONMENT"])
 )
 
-# ─── 写入 Gold Iceberg 表（按 stat_date 分区）───
-gold_df.writeTo(
-    f"glue_catalog.{args['GLUE_DATABASE_GOLD']}.api_error_stats"
-).using("iceberg") \
- .partitionedBy("stat_date", "service_name") \
- .tableProperty("write.parquet.compression-codec", "snappy") \
- .overwritePartitions()   # 幂等写入，支持重跑
+# ─── 写入 Gold Iceberg 表（MERGE UPSERT，键命中则 UPDATE，否则 INSERT）───
+# 历史上这里是 .overwritePartitions()，bug：分区粒度 (stat_date, service_name) 比
+# 任务粒度（每小时）粗，hour=N 跑完会把同分区 hour=0..N-1 的数据全擦掉。
+# 改成 MERGE，键为 (stat_hour, service_name, error_code)，避免跨小时互相覆盖。
+gold_df.createOrReplaceTempView("gold_api_error_stats_source")
+iceberg_merge_upsert(
+    spark=spark,
+    source_view="gold_api_error_stats_source",
+    target_table=f"glue_catalog.{args['GLUE_DATABASE_GOLD']}.api_error_stats",
+    merge_keys=["stat_hour", "service_name", "error_code"],
+)
 
-print(f"Gold api_error_stats written: {gold_df.count()} rows")
+print(f"Gold api_error_stats merged: {gold_df.count()} source rows for window {processing_hour_start}")
 
 job.commit()

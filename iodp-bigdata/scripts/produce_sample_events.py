@@ -31,6 +31,10 @@ import boto3
 
 VALID_EVENT_TYPES = ["click", "view", "scroll", "purchase", "add_to_cart", "checkout"]
 VALID_ERROR_CODES = ["E1001", "E1002", "E2001", "E2002", "E3001", "E4001"]
+VALID_ERROR_TYPES = [
+    "TimeoutException", "NullPointerException", "ConnectionRefused",
+    "IllegalArgumentException", "ResourceExhausted", "DownstreamUnavailable",
+]
 SERVICES = ["payment-service", "user-service", "search-service", "checkout-service"]
 
 
@@ -51,21 +55,27 @@ def _make_clickstream_event() -> Dict[str, Any]:
 
 
 def _make_app_log_event(error_rate: float) -> Dict[str, Any]:
+    """字段名与 Silver DDL parsed_logs 表完全对齐。
+    历史字段名（error_message / duration_ms）已废弃，Silver 侧仍通过 coalesce 兼容旧 Bronze 数据。
+    """
     is_error = random.random() < error_rate
     return {
         "log_id":          str(uuid.uuid4()),
-        "user_id":         f"usr_{random.randint(10_000_000, 99_999_999)}",
-        "service_name":    random.choice(SERVICES),
-        "log_level":       "ERROR" if is_error else "INFO",
-        "error_code":      random.choice(VALID_ERROR_CODES) if is_error else None,
-        "error_message":   "DownstreamTimeout" if is_error else None,
-        "stack_trace":     "Traceback...\n  ..." if is_error else None,
-        "req_path":        f"/api/v1/resource/{random.randint(1, 50)}",
-        "req_method":      random.choice(["GET", "POST", "PUT"]),
-        "http_status":     500 if is_error else 200,
-        "duration_ms":     random.randint(50, 800),
         "trace_id":        str(uuid.uuid4()),
+        "span_id":         uuid.uuid4().hex[:16],
+        "service_name":    random.choice(SERVICES),
+        "instance_id":     f"i-{uuid.uuid4().hex[:8]}",
+        "log_level":       "ERROR" if is_error else "INFO",
         "event_timestamp": datetime.now(timezone.utc).isoformat(),
+        "message":         "Downstream timeout while calling backend" if is_error else "Request OK",
+        "error_code":      random.choice(VALID_ERROR_CODES) if is_error else None,
+        "error_type":      random.choice(VALID_ERROR_TYPES) if is_error else None,
+        "http_status":     500 if is_error else 200,
+        "stack_trace":     "Traceback...\n  ..." if is_error else None,
+        "req_method":      random.choice(["GET", "POST", "PUT"]),
+        "req_path":        f"/api/v1/resource/{random.randint(1, 50)}",
+        "user_id":         f"usr_{random.randint(10_000_000, 99_999_999)}",
+        "req_duration_ms": random.randint(50, 800),
         "environment":     "demo",
     }
 

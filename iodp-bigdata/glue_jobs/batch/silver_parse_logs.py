@@ -64,6 +64,15 @@ args = getResolvedOptions(sys.argv, [
     "LINEAGE_TABLE", "DQ_TABLE", "DQ_THRESHOLD_TABLE", "ENVIRONMENT",
 ])
 
+
+def _get_optional_arg(name):
+    """getResolvedOptions 会因缺参直接抛异常；用这个包一层做可选参数。"""
+    try:
+        return getResolvedOptions(sys.argv, [name])[name]
+    except Exception:
+        return None
+
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -74,10 +83,16 @@ configure_iceberg(spark, args["SILVER_BUCKET"])
 
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARN", "ERROR", "FATAL"}
 
-# ─── 1. 拼出上一小时 Bronze 路径 ───
-now_utc    = datetime.now(timezone.utc)
-hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
-hour_start = hour_end - timedelta(hours=1)
+# ─── 1. 决定要处理的小时窗口（cron 默认上一小时；--TARGET_HOUR 覆盖）───
+target_hour_str = _get_optional_arg("TARGET_HOUR")
+if target_hour_str:
+    hour_start = datetime.strptime(target_hour_str, "%Y-%m-%d-%H").replace(tzinfo=timezone.utc)
+    hour_end   = hour_start + timedelta(hours=1)
+    print(f"TARGET_HOUR override: {hour_start.isoformat()}")
+else:
+    now_utc    = datetime.now(timezone.utc)
+    hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
+    hour_start = hour_end - timedelta(hours=1)
 
 bronze_root    = args["BRONZE_BUCKET"]
 prefix_segment = args["BRONZE_PREFIX"].lstrip("/")
@@ -110,21 +125,24 @@ if input_count == 0:
     job.commit()
     sys.exit(0)
 
-# ─── 4. 字段标准化（producer 写 duration_ms，Silver/Gold 表用 req_duration_ms）+ 注入 ingest_timestamp ───
+# ─── 4. 字段标准化（producer 已对齐 DDL schema，这里仅做类型 cast 和注入 ingest_timestamp）───
 normalized_df = bronze_raw.select(
     col("log_id"),
-    col("user_id"),
-    col("service_name"),
-    col("log_level"),
-    col("error_code"),
-    col("error_message"),
-    col("stack_trace"),
-    col("req_path"),
-    col("req_method"),
-    col("http_status").cast("integer").alias("http_status"),
-    col("duration_ms").cast("double").alias("req_duration_ms"),
     col("trace_id"),
+    col("span_id"),
+    col("service_name"),
+    col("instance_id"),
+    col("log_level"),
     to_timestamp(col("event_timestamp")).alias("event_timestamp"),
+    col("message"),
+    col("error_code"),
+    col("error_type"),
+    col("http_status").cast("integer").alias("http_status"),
+    col("stack_trace"),
+    col("req_method"),
+    col("req_path"),
+    col("user_id"),
+    col("req_duration_ms").cast("double").alias("req_duration_ms"),
     col("environment"),
     current_timestamp().alias("ingest_timestamp"),
 )

@@ -2,8 +2,10 @@
 # 事件驱动 S3 Vectors 索引器（GA 2025-12）
 #
 # 架构：Gold S3 incident_summary/*.parquet 文件新增时
-#       → S3 事件 → Lambda → Bedrock Embedding → S3 Vectors put_vectors
+#       → S3 事件 → Lambda → DashScope text-embedding-v3 → S3 Vectors put_vectors
 # 取代旧的 OpenSearch Serverless 方案，成本降低约 90%。
+# 之前 embedding 走 Bedrock Titan，但 AWS 中国账号 allowlisting 过不了，
+# 已统一切到 DashScope（与 iodp-agent 查询侧同一模型，保证向量空间一致）。
 #
 # 构建步骤（Lambda ZIP 需手动构建）:
 #   cd lambda/vector_indexer && pip install -r requirements.txt -t . && zip -r ../vector_indexer.zip .
@@ -56,14 +58,8 @@ resource "aws_iam_role_policy" "vector_indexer" {
           "arn:aws:s3:::${var.gold_bucket_name}/incident_summary/*",
         ]
       },
-      {
-        Sid    = "BedrockEmbeddings"
-        Effect = "Allow"
-        Action = ["bedrock:InvokeModel"]
-        Resource = [
-          "arn:aws:bedrock:${var.aws_region}::foundation-model/amazon.titan-embed-text-v2:0"
-        ]
-      },
+      # BedrockEmbeddings 已删除：embedding 改走 DashScope OpenAI 兼容 endpoint
+      # （IODP_LLM_API_KEY 通过环境变量注入，走公网不经 AWS IAM）。
       {
         Sid    = "S3VectorsWrite"
         Effect = "Allow"
@@ -107,7 +103,7 @@ resource "aws_lambda_function" "vector_indexer" {
   source_code_hash = fileexists(local.zip_path) ? filebase64sha256(local.zip_path) : null
 
   # 不设 reserved_concurrent_executions：新 AWS 账户 Lambda unreserved 配额默认只有 10，
-  # 占用 reserved 会让剩余低于最低 10 限制。配额提升后再恢复（建议值 2 控制 Bedrock 调用费率）。
+  # 占用 reserved 会让剩余低于最低 10 限制。配额提升后再恢复（建议值 2 控制 DashScope 调用费率）。
 
   dead_letter_config {
     target_arn = aws_sqs_queue.indexer_dlq.arn
@@ -117,9 +113,10 @@ resource "aws_lambda_function" "vector_indexer" {
     variables = {
       VECTOR_BUCKET_NAME = var.vector_bucket_name
       INDEX_NAME         = var.vector_index_name
-      BEDROCK_REGION     = var.aws_region
       ENVIRONMENT        = var.environment
       BATCH_SIZE         = "50"
+      # DashScope OpenAI 兼容 endpoint（与 iodp-agent Lambda 共用同一 key）
+      IODP_LLM_API_KEY   = var.llm_api_key
     }
   }
 

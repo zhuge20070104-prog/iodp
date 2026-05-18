@@ -66,6 +66,16 @@ resource "aws_iam_role_policy" "glue_execution_policy" {
         Effect = "Allow"
         Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "arn:aws:logs:*:*:log-group:/aws-glue/*"
+      },
+      {
+        # Glue --enable-metrics=true 需要把 Spark 指标推到 CloudWatch 命名空间
+        # Glue 内部用 PutMetricData 写 namespace=Glue，没有 IAM 时只产生 403 噪音，
+        # 不影响 job 业务逻辑；但会让 driver 日志多一段 stack trace，并被 Glue Studio
+        # 误判为失败状态的一部分。资源级别不可控，必须 "*"。
+        Sid      = "CloudWatchPutMetrics"
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
       }
     ]
   })
@@ -114,8 +124,15 @@ resource "aws_glue_job" "silver_enrich_clicks" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/silver-enrich-clicks/"
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    # Glue 4.0 上 --datalake-formats=iceberg 加载了 jar 但不可靠地注入
+    # spark.sql.extensions，导致 MERGE INTO 被 Spark 默认 catalyst 接管
+    # 抛 "MERGE INTO TABLE is not supported temporarily"。这里显式补上。
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--BRONZE_BUCKET"                    = "s3://${var.bronze_bucket_name}/"
     "--BRONZE_PREFIX"                    = "clickstream/"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
@@ -148,8 +165,13 @@ resource "aws_glue_job" "silver_parse_logs" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/silver-parse-logs/"
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    # 同 silver_enrich_clicks：显式补 spark.sql.extensions 让 MERGE INTO 走 Iceberg
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--BRONZE_BUCKET"                    = "s3://${var.bronze_bucket_name}/"
     "--BRONZE_PREFIX"                    = "app_logs/"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
@@ -186,10 +208,16 @@ resource "aws_glue_job" "gold_hourly_active_users" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/gold-hourly-active-users/"
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    # 全平台统一开启 Iceberg SQL extension（参见 silver_enrich_clicks 上方说明）
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
     "--GOLD_BUCKET"                      = "s3://${var.gold_bucket_name}/"
+    "--LINEAGE_TABLE"                    = var.lineage_table_name
     "--GLUE_DATABASE_SILVER"             = aws_glue_catalog_database.silver.name
     "--GLUE_DATABASE_GOLD"               = aws_glue_catalog_database.gold.name
     "--ENVIRONMENT"                      = var.environment
@@ -216,8 +244,12 @@ resource "aws_glue_job" "gold_api_error_stats" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/gold-api-error-stats/"
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
     "--GOLD_BUCKET"                      = "s3://${var.gold_bucket_name}/"
     "--GLUE_DATABASE_SILVER"             = aws_glue_catalog_database.silver.name
@@ -246,8 +278,12 @@ resource "aws_glue_job" "gold_incident_summary" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/gold-incident-summary/"
     "--job-bookmark-option"              = "job-bookmark-enable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--SILVER_BUCKET"                    = "s3://${var.silver_bucket_name}/"
     "--GOLD_BUCKET"                      = "s3://${var.gold_bucket_name}/"
     "--LINEAGE_TABLE"                    = var.lineage_table_name

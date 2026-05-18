@@ -91,6 +91,14 @@ resource "aws_iam_role_policy" "replay_glue" {
         Action = ["s3:GetObject"]
         Resource = "arn:aws:s3:::${var.scripts_bucket_name}/*"
       },
+      {
+        # Spark UI event log 写到 scripts_bucket/spark-history/<job>/
+        # 仅授 spark-history 前缀，避免越权写到脚本目录
+        Sid    = "S3WriteSparkHistory"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = "arn:aws:s3:::${var.scripts_bucket_name}/spark-history/*"
+      },
     ]
   })
 }
@@ -114,8 +122,14 @@ resource "aws_glue_job" "replay_app_logs" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/replay-app-logs/"
     "--job-bookmark-option"              = "job-bookmark-disable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    # 与 compute 模块保持一致：Glue 4.0 --datalake-formats=iceberg 不可靠注入
+    # spark.sql.extensions，全平台 Glue Job 都显式补 --conf。
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--BRONZE_BUCKET"                    = var.bronze_bucket_name
     "--LINEAGE_TABLE"                    = var.lineage_table_name
     "--ENVIRONMENT"                      = var.environment
@@ -148,8 +162,12 @@ resource "aws_glue_job" "replay_clickstream" {
     "--enable-auto-scaling"              = "true"
     "--enable-metrics"                   = "true"
     "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-spark-ui"                  = "true"
+    "--spark-event-logs-path"            = "s3://${var.scripts_bucket_name}/spark-history/replay-clickstream/"
     "--job-bookmark-option"              = "job-bookmark-disable"
     "--extra-py-files"                   = "s3://${var.scripts_bucket_name}/lib.zip"
+    "--datalake-formats"                 = "iceberg"
+    "--conf"                             = "spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
     "--BRONZE_BUCKET"                    = var.bronze_bucket_name
     "--LINEAGE_TABLE"                    = var.lineage_table_name
     "--ENVIRONMENT"                      = var.environment

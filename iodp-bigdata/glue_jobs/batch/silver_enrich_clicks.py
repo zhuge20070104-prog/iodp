@@ -72,6 +72,15 @@ args = getResolvedOptions(sys.argv, [
     "LINEAGE_TABLE", "DQ_TABLE", "DQ_THRESHOLD_TABLE", "ENVIRONMENT",
 ])
 
+
+def _get_optional_arg(name):
+    """getResolvedOptions 会因缺参直接抛异常；用这个包一层做可选参数。"""
+    try:
+        return getResolvedOptions(sys.argv, [name])[name]
+    except Exception:
+        return None
+
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -82,10 +91,19 @@ configure_iceberg(spark, args["SILVER_BUCKET"])
 
 VALID_EVENT_TYPES = {"click", "view", "scroll", "purchase", "add_to_cart", "checkout"}
 
-# ─── 1. 拼出上一小时 Bronze 路径（Firehose dynamic partitioning 落点）───
-now_utc    = datetime.now(timezone.utc)
-hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
-hour_start = hour_end - timedelta(hours=1)
+# ─── 1. 决定要处理的小时窗口 ───
+#   - cron 模式（默认）：处理「上一小时」分区
+#   - seed-production 模式：通过 --TARGET_HOUR=YYYY-MM-DD-HH (UTC) 指定，
+#     用于 producer 推完数据后立即触发，跳过等待下一小时 cron。
+target_hour_str = _get_optional_arg("TARGET_HOUR")
+if target_hour_str:
+    hour_start = datetime.strptime(target_hour_str, "%Y-%m-%d-%H").replace(tzinfo=timezone.utc)
+    hour_end   = hour_start + timedelta(hours=1)
+    print(f"TARGET_HOUR override: {hour_start.isoformat()}")
+else:
+    now_utc    = datetime.now(timezone.utc)
+    hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
+    hour_start = hour_end - timedelta(hours=1)
 
 bronze_root    = args["BRONZE_BUCKET"]               # 形如 s3://iodp-bronze-dev-XXX/
 prefix_segment = args["BRONZE_PREFIX"].lstrip("/")   # 形如 clickstream/

@@ -45,7 +45,7 @@ terraform -version     # >= 1.6.0
 # 凭证（必须）
 $env:AWS_ACCESS_KEY_ID     = "AKIAXXXXXXXXXXXXXXXX"
 $env:AWS_SECRET_ACCESS_KEY = "xxxxxxxx"
-$env:AWS_DEFAULT_REGION    = "us-east-1"
+$env:AWS_REGION            = "ap-southeast-1"   # 资源 region，与 Makefile 默认值一致
 ```
 
 **编辑 `terraform/environments/dev.tfvars`**（首次部署必填，否则 terraform 会交互式问你）：
@@ -68,7 +68,7 @@ bash scripts/upload_glue_scripts.sh dev
 ### 2. 部署基础设施 + 建 Iceberg 表
 
 ```powershell
-make init ENV=dev AWS_REGION=us-east-1
+make init ENV=dev AWS_REGION=ap-southeast-1
 ```
 
 这一步等价于：
@@ -187,7 +187,7 @@ iodp-bigdata/
                                                         ↑ 省 97%
 ```
 
-成本拆解 + Bedrock Agent 端的优化（模型路由 + Prompt Caching）见 `INTERVIEW.md`。
+成本拆解 + Agent 端的优化（DashScope Qwen 双模型路由 + Prompt Caching）见 `INTERVIEW.md`。
 
 ---
 

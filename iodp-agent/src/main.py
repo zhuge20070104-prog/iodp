@@ -23,20 +23,31 @@ DynamoDB Jobs 表 Schema:
     TTL            Number   Unix timestamp (1 hour TTL)
 """
 
+import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 import boto3
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from src.config import settings
 from src.graph.checkpointer import get_checkpointer
 from src.graph.graph_builder import build_graph
+from src.log_utils import log_event
+
+# Lambda runtime pre-installs a handler on the root logger, so basicConfig is a
+# no-op. We must explicitly raise the root level — otherwise every logger.info()
+# in this project is filtered out and CloudWatch shows only START/END/REPORT.
+logging.getLogger().setLevel(logging.INFO)
+# Quiet down noisy AWS SDK loggers; keep our own loggers at INFO.
+for noisy in ("botocore", "urllib3", "s3transfer", "boto3"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +58,12 @@ app = FastAPI(
 )
 
 _dynamodb = boto3.resource("dynamodb", region_name=settings.aws_region)
+
+# Lambda 自调用 worker：POST 时通过 lambda.invoke(InvocationType='Event') 触发自己跑
+# LangGraph，立即返回 202。AWS_LAMBDA_FUNCTION_NAME 在 Lambda runtime 由系统注入；
+# 本地 uvicorn 跑时这个变量不存在，会走 asyncio.create_task fallback。
+_SELF_FUNCTION_NAME = os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+_lambda_client = boto3.client("lambda", region_name=settings.aws_region)
 
 
 def _jobs_table():
@@ -142,6 +159,11 @@ async def run_graph_job(job_id: str, thread_id: str, request: DiagnoseRequest) -
     """
     try:
         _update_job_status(job_id, "running")
+        log_event(
+            "request", "start",
+            job_id=job_id, thread_id=thread_id,
+            user_id=request.user_id, message_chars=len(request.message),
+        )
 
         checkpointer = get_checkpointer()
         graph        = build_graph(checkpointer)
@@ -199,9 +221,15 @@ async def run_graph_job(job_id: str, thread_id: str, request: DiagnoseRequest) -
             status="completed",
             result_json=json.dumps(result, ensure_ascii=False),
         )
-        logger.info("Job %s completed successfully", job_id)
+        log_event(
+            "request", "success",
+            job_id=job_id, thread_id=thread_id, intent=intent,
+            has_bug_report=bool(synthesizer_state.get("bug_report")),
+            reply_chars=len(user_reply),
+        )
 
     except Exception as e:
+        log_event("request", "error", job_id=job_id, thread_id=thread_id, error=str(e))
         logger.exception("Job %s failed: %s", job_id, e)
         _update_job_status(job_id, status="failed", error=str(e))
 
@@ -211,21 +239,37 @@ async def run_graph_job(job_id: str, thread_id: str, request: DiagnoseRequest) -
 # ════════════════════════════════════════════════════════════════════════
 
 @app.post("/diagnose", response_model=JobResponse, status_code=202)
-async def submit_diagnosis(
-    request: DiagnoseRequest,
-    background_tasks: BackgroundTasks,
-) -> JobResponse:
+async def submit_diagnosis(request: DiagnoseRequest) -> JobResponse:
     """
     提交异步诊断 Job。立即返回 job_id，客户端通过 GET /diagnose/{job_id} 轮询结果。
+
+    在 Lambda 环境用 boto3.lambda.invoke(InvocationType='Event') 异步触发
+    worker Lambda（同一函数，靠 event.source 路由），绕开 Mangum + BackgroundTasks
+    会等所有 BG task 完成才返回 response 的坑（之前导致 33s Lambda → API Gateway
+    29s 超时 → 客户端见 503）。
+    本地 uvicorn 跑时退化为 asyncio.create_task，BG task 不会撞 ASGI 长进程。
     """
     job_id    = str(uuid.uuid4())
     thread_id = request.thread_id or f"thread_{job_id}"
     now       = datetime.now(timezone.utc).isoformat()
 
     _create_job_record(job_id, thread_id, request)
-    background_tasks.add_task(run_graph_job, job_id, thread_id, request)
 
-    logger.info("Job %s queued for thread %s", job_id, thread_id)
+    if _SELF_FUNCTION_NAME:
+        _lambda_client.invoke(
+            FunctionName=_SELF_FUNCTION_NAME,
+            InvocationType="Event",
+            Payload=json.dumps({
+                "source":    "iodp-worker",
+                "job_id":    job_id,
+                "thread_id": thread_id,
+                "request":   request.model_dump(),
+            }),
+        )
+        logger.info("Job %s dispatched to worker via Lambda self-invoke", job_id)
+    else:
+        asyncio.create_task(run_graph_job(job_id, thread_id, request))
+        logger.info("Job %s queued locally (asyncio task)", job_id)
 
     return JobResponse(
         job_id=job_id,
@@ -233,6 +277,19 @@ async def submit_diagnosis(
         thread_id=thread_id,
         created_at=now,
     )
+
+
+async def worker_handler(event: dict) -> dict:
+    """
+    Lambda 自调用 worker 入口。由 lambda_handler.py 在 event.source=='iodp-worker'
+    时调用，直接跑 run_graph_job。这里独立于 FastAPI/Mangum，没有"等响应再返回"的
+    冻结问题。
+    """
+    job_id    = event["job_id"]
+    thread_id = event["thread_id"]
+    request   = DiagnoseRequest(**event["request"])
+    await run_graph_job(job_id, thread_id, request)
+    return {"job_id": job_id, "status": "completed"}
 
 
 @app.get("/diagnose/{job_id}", response_model=JobResponse)

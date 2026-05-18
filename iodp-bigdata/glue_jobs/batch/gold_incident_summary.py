@@ -23,7 +23,7 @@ from pyspark.sql.functions import (
 )
 
 from lib.lineage import write_lineage_event
-from lib.iceberg_utils import configure_iceberg
+from lib.iceberg_utils import configure_iceberg, iceberg_merge_upsert
 
 args = getResolvedOptions(sys.argv, [
     "JOB_NAME", "GOLD_BUCKET",
@@ -116,14 +116,19 @@ for row in rows:
 if incident_records:
     incidents_rdd = spark.sparkContext.parallelize(incident_records)
     incidents_df = spark.read.json(incidents_rdd)
-    incidents_df.writeTo(
-        f"glue_catalog.{args['GLUE_DATABASE_GOLD']}.incident_summary"
-    ).using("iceberg") \
-     .partitionedBy("stat_date") \
-     .tableProperty("write.parquet.compression-codec", "snappy") \
-     .overwritePartitions()
+    # MERGE UPSERT 按 incident_id（INC-{date}-{service}-{error_code}）做唯一键。
+    # 本任务是 daily cadence、每次只写一个 stat_date，原 .overwritePartitions() 不会
+    # 跨天互覆盖，所以历史上没暴露 bug；但改 MERGE 跟另两张 Gold 表保持一致，
+    # 同一天重跑时只 UPDATE 命中行，不再先擦后写。
+    incidents_df.createOrReplaceTempView("gold_incident_summary_source")
+    iceberg_merge_upsert(
+        spark=spark,
+        source_view="gold_incident_summary_source",
+        target_table=f"glue_catalog.{args['GLUE_DATABASE_GOLD']}.incident_summary",
+        merge_keys=["incident_id"],
+    )
 
-    print(f"incident_summary written: {len(incident_records)} rows")
+    print(f"incident_summary merged: {len(incident_records)} source rows")
 else:
     print("No incidents detected for this period.")
 

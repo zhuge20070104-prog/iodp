@@ -22,8 +22,8 @@ from openai import OpenAI
 
 GOLD_TABLE       = "incident_summary"
 DEFAULT_INDEX    = "incident-solutions"
-# embedding 用 OpenAI 兼容 endpoint (默认通义千问 text-embedding-v3, 1024 维)
-# AWS Bedrock 被 allowlist 拒了，所以 Bedrock 路线行不通。
+# embedding 用 OpenAI 兼容 endpoint（默认 DashScope text-embedding-v3, 1024 维）
+# 与 iodp-agent 查询侧 + iodp-bigdata vector_indexer 用同一模型，保证向量空间一致。
 EMBED_BASE_URL   = os.environ.get("IODP_EMBEDDING_BASE_URL") or os.environ.get("IODP_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 EMBED_API_KEY    = os.environ.get("IODP_EMBEDDING_API_KEY") or os.environ.get("IODP_LLM_API_KEY", "")
 EMBED_MODEL_ID   = os.environ.get("IODP_EMBEDDING_MODEL", "text-embedding-v3")
@@ -31,11 +31,8 @@ EMBED_DIMENSION  = int(os.environ.get("IODP_EMBEDDING_DIMENSIONS", "1024"))
 PUT_BATCH_SIZE   = 50  # S3 Vectors put_vectors 单次最多 500 条
 
 
-def embed(_client_unused, text: str) -> List[float]:
-    """通过 OpenAI 兼容 endpoint 生成文档向量。
-
-    保留第一个参数（旧 bedrock_client）只为向后兼容调用方签名，实际不使用。
-    """
+def embed(text: str) -> List[float]:
+    """通过 OpenAI 兼容 endpoint 生成文档向量。"""
     client = OpenAI(api_key=EMBED_API_KEY, base_url=EMBED_BASE_URL)
     resp = client.embeddings.create(
         model=EMBED_MODEL_ID,
@@ -82,7 +79,7 @@ def build_record(row, vector: List[float]) -> Dict[str, Any]:
     }
 
 
-def index_incidents(s3vectors_client, bedrock_client, df, vector_bucket: str, index_name: str) -> int:
+def index_incidents(s3vectors_client, df, vector_bucket: str, index_name: str) -> int:
     """全量向量化并分批写入 S3 Vectors。返回写入条数。"""
     batch: List[Dict[str, Any]] = []
     written = 0
@@ -96,7 +93,7 @@ def index_incidents(s3vectors_client, bedrock_client, df, vector_bucket: str, in
                 str(row.get("root_cause") or ""),
                 str(row.get("resolution") or ""),
             ]))
-            vector = embed(bedrock_client, content)
+            vector = embed(content)
             batch.append(build_record(row, vector))
         except Exception as e:
             print(f"[WARN] embedding failed for {row.get('incident_id')}: {e}")
@@ -149,12 +146,12 @@ def main():
         print("No incidents to index. Exiting.")
         return
 
-    # ─── 2. 初始化 S3 Vectors + Bedrock 客户端 ───
-    s3vectors      = boto3.client("s3vectors", region_name=args.region)
-    bedrock_client = boto3.client("bedrock-runtime", region_name=args.region)
+    # ─── 2. 初始化 S3 Vectors 客户端 ───
+    # （embedding 走 OpenAI 兼容 client，在 embed() 内部 lazy 初始化）
+    s3vectors = boto3.client("s3vectors", region_name=args.region)
 
     # ─── 3. 全量索引 ───
-    written = index_incidents(s3vectors, bedrock_client, df, args.vector_bucket, args.index_name)
+    written = index_incidents(s3vectors, df, args.vector_bucket, args.index_name)
     print(f"Done. Indexed {written}/{len(df)} incidents to s3vectors://{args.vector_bucket}/{args.index_name}")
 
 

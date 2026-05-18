@@ -50,26 +50,22 @@ Windows 用户：本仓库 Makefile 用 bash 写的，请用 **WSL2 / Git Bash**
 # AWS 凭证（必需）
 export AWS_ACCESS_KEY_ID="AKIA..."
 export AWS_SECRET_ACCESS_KEY="..."
-export AWS_DEFAULT_REGION="ap-southeast-1"
+export AWS_REGION="ap-southeast-1"
 
 # LLM API key（必需，Agent 调 Qwen 用）
 export IODP_LLM_API_KEY="sk-..."
 
 # 可选：环境名（默认 dev）
 export ENV="dev"
-
-# 可选：AWS region（默认 ap-southeast-1）
-export AWS_REGION="ap-southeast-1"
 ```
 
 | 变量 | 必需 | 默认 | 在哪用 |
 |---|---|---|---|
 | `AWS_ACCESS_KEY_ID` | ✅ | - | 所有 Terraform / aws cli 调用 |
 | `AWS_SECRET_ACCESS_KEY` | ✅ | - | 同上 |
-| `AWS_DEFAULT_REGION` | ✅ | - | aws cli 默认 region |
+| `AWS_REGION` | ✅ | - | aws cli / SDK / Terraform 默认 region |
 | `IODP_LLM_API_KEY` | ✅ | - | 被 Agent Makefile 读，作为 Terraform `llm_api_key` 变量注入到 Lambda env |
 | `ENV` | ⬜ | `dev` | 资源后缀（如 `iodp-bug-tickets-dev`）|
-| `AWS_REGION` | ⬜ | `ap-southeast-1` | Makefile 内部传给 Terraform |
 
 > ⚠️ Bigdata 用远端 S3 backend，state 桶存在 `us-east-1`（见 [iodp-bigdata/Makefile](iodp-bigdata/Makefile) 第 13-15 行）；Agent 用本地 backend。这是有意的拆分，**不要改**。
 
@@ -236,7 +232,7 @@ make destroy
 > ⚠️ S3 数据湖里的 Bronze/Silver/Gold 数据**永久丢失**，无法恢复。
 > ⚠️ Terraform state bucket（us-east-1）**不会被删**，可以重复用。
 
-闲置成本：S3 Vectors / Lambda / Bedrock 都是按用量计费，0 流量近 0 元。Glue triggers 默认关闭（FinOps 设计），打开后 ~$35/周。
+闲置成本：S3 Vectors / Lambda / DashScope 都是按用量计费，0 流量近 0 元。Glue triggers 默认关闭（FinOps 设计），打开后 ~$35/周。
 
 ---
 

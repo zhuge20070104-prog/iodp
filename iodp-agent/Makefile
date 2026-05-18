@@ -1,5 +1,5 @@
 .PHONY: init deploy destroy destroy-confirm help check-aws check-tools build-image push-image \
-       seed-data index-kb test-api status clean output
+       seed-data seed-data-rag-only index-kb test-api status clean output
 
 # ──────────────────────────────────────────────────────────────
 # 环境变量
@@ -55,7 +55,7 @@ check-aws: check-tools
 		echo "请先设置:"; \
 		echo "  export AWS_ACCESS_KEY_ID=\"AKIAXXXXXXXXXXXXXXXX\""; \
 		echo "  export AWS_SECRET_ACCESS_KEY=\"xxxxxxxx\""; \
-		echo "  export AWS_DEFAULT_REGION=\"$(AWS_REGION)\""; \
+		echo "  export AWS_REGION=\"$(AWS_REGION)\""; \
 		exit 1; \
 	fi
 	@echo "✅ AWS 凭证验证通过 (账号: $(AWS_ACCOUNT_ID), 区域: $(AWS_REGION), 环境: $(ENV))"
@@ -140,11 +140,22 @@ init: check-aws
 # 注入 Demo 测试数据
 # ──────────────────────────────────────────────────────────────
 seed-data: check-aws
-	@echo "📊 注入测试数据..."
+	@echo "📊 注入测试数据（mode=full：全部 mock，跳过 Glue 流水线）..."
 	cd scripts && python3 seed_test_data.py \
 		--region $(AWS_REGION) \
-		--env $(ENV)
+		--env $(ENV) \
+		--mode full
 	@echo "✅ 测试数据注入完成"
+
+# rag-only 模式：只 mock Glue 流水线产不出的两份数据（incident_summary + DQ）
+# 由根 Makefile 的 seed-production 在 bigdata 真实流水线跑完后调用
+seed-data-rag-only: check-aws
+	@echo "📊 注入 RAG-only 测试数据（incident_summary + DQ reports）..."
+	cd scripts && python3 seed_test_data.py \
+		--region $(AWS_REGION) \
+		--env $(ENV) \
+		--mode rag-only
+	@echo "✅ RAG-only 测试数据注入完成"
 
 # ──────────────────────────────────────────────────────────────
 # 索引 RAG 知识库到 S3 Vectors
@@ -188,6 +199,12 @@ deploy-frontend: check-aws build-frontend
 # 日常部署（更新代码）
 # ──────────────────────────────────────────────────────────────
 deploy: check-aws build-image push-image
+	@echo ""
+	@# 幂等 init -reconfigure：处理 .terraform 缓存与 backend.tf 不同步的情况
+	@# （比如 backend 从 s3 切到 local 但缓存还记着 s3，apply 会拒绝跑）。
+	@# 已经一致时是 no-op，~2s 开销换永不踩坑。
+	@echo "📦 同步 Terraform backend 配置..."
+	cd $(TF_DIR) && terraform init -reconfigure -input=false > /dev/null
 	@echo ""
 	@echo "📦 terraform apply（同步 Lambda image + env vars，如 IODP_LLM_API_KEY 变化）..."
 	cd $(TF_DIR) && terraform apply \
@@ -335,4 +352,4 @@ help:
 	@echo "  # 指定环境"
 	@echo "  make init ENV=staging"
 	@echo ""
-	@echo "💰 成本提醒: 主要成本是 Lambda 调用 + Bedrock 推理，闲置时近零；S3 Vectors 按存储/查询计费极低"
+	@echo "💰 成本提醒: 主要成本是 Lambda 调用 + DashScope (Qwen) token，闲置时近零；S3 Vectors 按存储/查询计费极低"

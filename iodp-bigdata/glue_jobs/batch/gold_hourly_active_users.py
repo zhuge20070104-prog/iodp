@@ -27,13 +27,22 @@ from pyspark.sql.functions import (
 )
 
 from lib.lineage import write_lineage_event
-from lib.iceberg_utils import configure_iceberg
+from lib.iceberg_utils import configure_iceberg, iceberg_merge_upsert
 
 args = getResolvedOptions(sys.argv, [
     "JOB_NAME", "SILVER_BUCKET", "GOLD_BUCKET",
     "GLUE_DATABASE_SILVER", "GLUE_DATABASE_GOLD",
     "LINEAGE_TABLE", "ENVIRONMENT",
 ])
+
+
+def _get_optional_arg(name):
+    """getResolvedOptions 会因缺参直接抛异常；用这个包一层做可选参数。"""
+    try:
+        return getResolvedOptions(sys.argv, [name])[name]
+    except Exception:
+        return None
+
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -43,9 +52,16 @@ job.init(args["JOB_NAME"], args)
 
 configure_iceberg(spark, args["GOLD_BUCKET"])
 
-now_utc    = datetime.now(timezone.utc)
-hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
-hour_start = hour_end - timedelta(hours=1)
+# 处理窗口（cron 默认上一小时；--TARGET_HOUR=YYYY-MM-DD-HH UTC 覆盖）
+target_hour_str = _get_optional_arg("TARGET_HOUR")
+if target_hour_str:
+    hour_start = datetime.strptime(target_hour_str, "%Y-%m-%d-%H").replace(tzinfo=timezone.utc)
+    hour_end   = hour_start + timedelta(hours=1)
+    print(f"TARGET_HOUR override: {hour_start.isoformat()}")
+else:
+    now_utc    = datetime.now(timezone.utc)
+    hour_end   = now_utc.replace(minute=0, second=0, microsecond=0)
+    hour_start = hour_end - timedelta(hours=1)
 
 # ─── 读取 Silver 上一小时点击流 ───
 silver_df = spark.read.format("iceberg").load(
@@ -86,16 +102,19 @@ gold_df = silver_df.groupBy(
     "environment", lit(args["ENVIRONMENT"])
 )
 
-# ─── 写入 Gold Iceberg（覆盖当前分区，支持幂等重跑）───
-gold_df.writeTo(
-    f"glue_catalog.{args['GLUE_DATABASE_GOLD']}.hourly_active_users"
-).using("iceberg") \
- .partitionedBy("stat_date") \
- .tableProperty("write.parquet.compression-codec", "snappy") \
- .overwritePartitions()
+# ─── 写入 Gold Iceberg（MERGE UPSERT，按 stat_hour 做唯一键）───
+# 历史上这里是 .overwritePartitions()，bug：分区粒度 stat_date 比任务粒度（每小时）粗，
+# hour=N 跑完会把同 stat_date 下 hour=0..N-1 的行全擦掉。改 MERGE 后跨小时不互相覆盖。
+gold_df.createOrReplaceTempView("gold_hourly_active_users_source")
+iceberg_merge_upsert(
+    spark=spark,
+    source_view="gold_hourly_active_users_source",
+    target_table=f"glue_catalog.{args['GLUE_DATABASE_GOLD']}.hourly_active_users",
+    merge_keys=["stat_hour"],
+)
 
 output_count = gold_df.count()
-print(f"Gold hourly_active_users written: {output_count} rows for {hour_start}")
+print(f"Gold hourly_active_users merged: {output_count} source rows for {hour_start}")
 
 write_lineage_event(
     source_table=f"s3://iodp-silver-{args['ENVIRONMENT']}/enriched_clicks/",

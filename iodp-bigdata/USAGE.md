@@ -69,7 +69,7 @@ Silver 数据
     └──→ Agent 线路（给 AI 故障诊断用的）
          ├── gold.incident_summary      → S3 Vectors RAG 知识库
          │   每天识别持续 >=2 小时的高错误率故障，生成摘要
-         │   经 Bedrock Embedding 向量化后 put_vectors 到 S3 Vectors index
+         │   经 DashScope text-embedding-v3 向量化后 put_vectors 到 S3 Vectors index
          │   Agent 用途："历史上有没有类似的故障？当时怎么解决的？"
          │
          └── v_error_log_enriched（视图）→ Agent 实时查询入口
@@ -245,7 +245,7 @@ Gold S3 写入新 parquet
 
 ### 如何重新消费
 
-排查并修复失败原因（S3 Vectors 限流、Bedrock 限流等）后，手动取出消息重新触发：
+排查并修复失败原因（S3 Vectors 限流、DashScope 限流/欠费等）后，手动取出消息重新触发：
 
 ```bash
 # 1. 从 DLQ 取消息
@@ -295,7 +295,7 @@ aws_iam_role（自定义角色）
 |---|---|---|
 | `terraform/modules/replay_jobs/main.tf:30-33` | `AWSGlueServiceRole`（Glue 基础权限） | S3 replay/bronze + Glue Catalog + DynamoDB lineage |
 | `terraform/modules/dlq_replay/main.tf:18-65` | 无（Lambda 不需要托管策略） | S3 dead_letter 读 + replay 写 + CloudWatch Logs |
-| `terraform/modules/vector_indexer/main.tf:28-87` | 无 | S3 Gold 读 + Bedrock + S3 Vectors + SQS DLQ + CloudWatch Logs |
+| `terraform/modules/vector_indexer/main.tf:28-87` | 无 | S3 Gold 读 + S3 Vectors + SQS DLQ + CloudWatch Logs（embedding 走 DashScope 公网，无 IAM） |
 
 Lambda 的基础权限（CloudWatch Logs）直接写在内联策略里，不需要额外的托管策略。Glue Job 因为涉及 Spark 集群管理、临时文件等复杂运行时，AWS 打包了一个专用的托管策略。
 

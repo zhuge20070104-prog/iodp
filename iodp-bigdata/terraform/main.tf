@@ -154,5 +154,6 @@ module "vector_indexer" {
   vector_bucket_arn   = var.vector_bucket_arn
   vector_index_name   = var.vector_index_name
   sns_alert_topic_arn = module.observability.sns_alert_topic_arn
+  llm_api_key         = var.llm_api_key
   tags                = local.mandatory_tags
 }

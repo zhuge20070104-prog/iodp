@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 import boto3
 
 from src.config import settings
+from src.log_utils import Timer, compress_sql, log_event
 
 logger = logging.getLogger(__name__)
 
@@ -67,37 +68,57 @@ def execute_athena_query(
     else:
         out_location = f"s3://{output_bucket.rstrip('/')}/athena-results/"
 
-    response = client.start_query_execution(
-        QueryString=sql,
-        QueryExecutionContext={"Database": database},
-        ResultConfiguration={"OutputLocation": out_location},
-        WorkGroup=workgroup,
+    compressed_sql = compress_sql(sql)
+    log_event(
+        "athena", "start",
+        database=database, workgroup=workgroup,
+        output_location=out_location, max_rows=max_rows,
+        sql=compressed_sql,
     )
-    query_execution_id = response["QueryExecutionId"]
 
-    # 轮询等待完成
-    waited       = 0
-    poll_interval = 2
-    while waited < max_wait_seconds:
-        status_response = client.get_query_execution(QueryExecutionId=query_execution_id)
-        state = status_response["QueryExecution"]["Status"]["State"]
+    with Timer() as total_t:
+        response = client.start_query_execution(
+            QueryString=sql,
+            QueryExecutionContext={"Database": database},
+            ResultConfiguration={"OutputLocation": out_location},
+            WorkGroup=workgroup,
+        )
+        query_execution_id = response["QueryExecutionId"]
 
-        if state == "SUCCEEDED":
-            break
-        elif state in ("FAILED", "CANCELLED"):
-            reason = status_response["QueryExecution"]["Status"].get("StateChangeReason", "")
-            raise RuntimeError(f"Athena query {state}: {reason}")
+        # 轮询等待完成
+        waited       = 0
+        poll_interval = 2
+        while waited < max_wait_seconds:
+            status_response = client.get_query_execution(QueryExecutionId=query_execution_id)
+            state = status_response["QueryExecution"]["Status"]["State"]
 
-        time.sleep(poll_interval)
-        waited += poll_interval
-    else:
-        raise TimeoutError(f"Athena query timed out after {max_wait_seconds}s")
+            if state == "SUCCEEDED":
+                break
+            elif state in ("FAILED", "CANCELLED"):
+                reason = status_response["QueryExecution"]["Status"].get("StateChangeReason", "")
+                log_event(
+                    "athena", "error",
+                    query_execution_id=query_execution_id,
+                    state=state, reason=reason,
+                    elapsed_ms=int((time.perf_counter() - total_t._start) * 1000),
+                )
+                raise RuntimeError(f"Athena query {state}: {reason}")
 
-    # 获取结果（只取第一页，避免内存/Token 溢出）
-    result_response = client.get_query_results(
-        QueryExecutionId=query_execution_id,
-        MaxResults=max_rows + 1,   # +1 用于判断是否被截断
-    )
+            time.sleep(poll_interval)
+            waited += poll_interval
+        else:
+            log_event(
+                "athena", "timeout",
+                query_execution_id=query_execution_id,
+                max_wait_seconds=max_wait_seconds,
+            )
+            raise TimeoutError(f"Athena query timed out after {max_wait_seconds}s")
+
+        # 获取结果（只取第一页，避免内存/Token 溢出）
+        result_response = client.get_query_results(
+            QueryExecutionId=query_execution_id,
+            MaxResults=max_rows + 1,   # +1 用于判断是否被截断
+        )
     column_info = result_response["ResultSet"]["ResultSetMetadata"]["ColumnInfo"]
     columns     = [col["Name"] for col in column_info]
 
@@ -113,12 +134,14 @@ def execute_athena_query(
     total_rows    = len(all_rows)
     rows_truncated = total_rows > max_rows
 
-    if rows_truncated:
-        logger.warning(
-            "Athena result truncated: fetched %d rows, returning first %d "
-            "(query_execution_id=%s). Increase athena_max_rows or add stricter WHERE clause.",
-            total_rows, max_rows, query_execution_id,
-        )
+    log_event(
+        "athena", "success",
+        query_execution_id=query_execution_id,
+        rows=min(total_rows, max_rows),
+        rows_truncated=rows_truncated,
+        total_rows_fetched=total_rows,
+        elapsed_ms=total_t.elapsed_ms,
+    )
 
     return {
         "rows":                         all_rows[:max_rows],

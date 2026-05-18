@@ -6,8 +6,14 @@
 职责：
   1. 从 S3 event 解析 bucket/key
   2. 读取 Parquet 文件（incident_summary 表）
-  3. 对每条记录调用 Bedrock Titan Embeddings V2 生成向量
+  3. 对每条记录调用 DashScope text-embedding-v3 生成 1024 维向量
   4. 批量写入 S3 Vectors 的 incident_solutions 索引
+
+Embedding 选型说明：
+  与 iodp-agent 端的查询侧（src/tools/s3_vectors_tool.py）保持同一模型，
+  否则索引向量与查询向量在不同语义空间，cosine 相似度等同噪声。
+  之前用 Bedrock Titan v2，但项目整体（agent + bigdata）统一切到 DashScope
+  text-embedding-v3 后弃用——AWS 中国账号过不了 Bedrock allowlisting。
 
 Response:
   {"indexed": N, "failed": M, "source_key": "..."}
@@ -20,31 +26,42 @@ from typing import Any, Dict, List
 from urllib.parse import unquote_plus
 
 import boto3
+from openai import OpenAI
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 VECTOR_BUCKET_NAME = os.environ["VECTOR_BUCKET_NAME"]
 INDEX_NAME         = os.environ.get("INDEX_NAME", "incident-solutions")
-BEDROCK_REGION     = os.environ.get("BEDROCK_REGION", "us-east-1")
+AWS_REGION         = os.environ.get("AWS_REGION", "ap-southeast-1")
 ENVIRONMENT        = os.environ.get("ENVIRONMENT", "prod")
 # put_vectors 单次最多 500 条，默认 50 安全
 BATCH_SIZE         = int(os.environ.get("BATCH_SIZE", "50"))
 
-bedrock    = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
-s3         = boto3.client("s3")
-s3vectors  = boto3.client("s3vectors", region_name=BEDROCK_REGION)
+# Embedding 配置：DashScope OpenAI 兼容 endpoint
+# IODP_LLM_API_KEY 通过 Terraform 注入（同 agent Lambda 的 LLM key）
+EMBED_BASE_URL   = os.environ.get("IODP_EMBEDDING_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+EMBED_API_KEY    = os.environ["IODP_LLM_API_KEY"]
+EMBED_MODEL_ID   = os.environ.get("IODP_EMBEDDING_MODEL", "text-embedding-v3")
+EMBED_DIMENSION  = int(os.environ.get("IODP_EMBEDDING_DIMENSIONS", "1024"))
+
+s3        = boto3.client("s3")
+s3vectors = boto3.client("s3vectors", region_name=AWS_REGION)
+_llm      = OpenAI(api_key=EMBED_API_KEY, base_url=EMBED_BASE_URL)
 
 
 def _get_embedding(text: str) -> List[float]:
-    """调用 Bedrock Titan Embeddings V2 生成 1024 维向量"""
-    response = bedrock.invoke_model(
-        modelId="amazon.titan-embed-text-v2:0",
-        body=json.dumps({"inputText": text[:8000], "dimensions": 1024, "normalize": True}),
-        contentType="application/json",
-        accept="application/json",
+    """调用 DashScope text-embedding-v3 生成 1024 维向量。
+
+    与 iodp-agent/src/tools/s3_vectors_tool.py 用同一模型，保证写入和查询
+    在同一语义空间，cosine similarity 才有意义。
+    """
+    resp = _llm.embeddings.create(
+        model=EMBED_MODEL_ID,
+        input=text[:2048],          # qwen text-embedding-v3 单次最大 2048 token
+        dimensions=EMBED_DIMENSION,
     )
-    return json.loads(response["body"].read())["embedding"]
+    return resp.data[0].embedding
 
 
 def _read_parquet_from_s3(bucket: str, key: str):

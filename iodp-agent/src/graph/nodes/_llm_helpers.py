@@ -1,20 +1,17 @@
 # src/graph/nodes/_llm_helpers.py
 """
-LLM 调用辅助：模型路由 + Prompt Caching。
+LLM 调用辅助：模型路由。
 
-设计：
-  - build_router_llm()    → router/rag/reply 使用，模型默认 Claude 3.5 Haiku
-  - build_reasoning_llm() → log_analyzer/bug_report 使用，模型默认 Claude 3.5 Sonnet
-  - cached_system(text)   → 把长 system prompt 包成 list-of-blocks +
-                            cache_control={"type":"ephemeral"}，让 Bedrock
-                            走 prompt cache（5 分钟内重复请求 input 走 cache）
+设计（DashScope Qwen via OpenAI 兼容 API）：
+  - build_router_llm()    → router/rag/reply 用，模型默认 qwen-turbo（便宜）
+  - build_reasoning_llm() → log_analyzer/bug_report 用，模型默认 qwen-max（聪明）
+  - cached_system(text)   → 仅构造 SystemMessage 的薄包装（旧 Bedrock 时代叫这名，
+                            历史背景在函数 docstring 里）
 
-Prompt Caching 限制：Anthropic 要求被缓存块达到模型最小 token 数
-（Sonnet 3.5 ≥ 1024 tokens，Haiku 3.5 ≥ 2048 tokens）。不达标时 cache_control
-被静默忽略，不影响功能，因此对所有节点统一开启即可。
+历史：项目曾用 Bedrock Claude + Anthropic Prompt Caching，AWS 中国账号过不了
+allowlisting 后切到 DashScope。Prompt Caching 机制随之失效（Qwen 没有等价
+特性），但函数名和调用点保留以减少改动面。
 """
-
-from typing import Any, List
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
@@ -48,17 +45,12 @@ def build_router_llm(*, max_tokens: int, temperature: float = 0) -> ChatOpenAI:
 
 def cached_system(text: str) -> SystemMessage:
     """
-    构造一个支持 Anthropic Prompt Caching 的 SystemMessage。
+    构造 SystemMessage。
 
-    - 开关关闭时退化为普通字符串 SystemMessage（保持向后兼容）
-    - 开关打开时使用 list-of-blocks 形式 + cache_control={"type":"ephemeral"}
+    历史背景：函数名 "cached_system" 是早期用 Bedrock + Anthropic Prompt Caching
+    时遗留的——当时会构造 list-of-blocks + cache_control=ephemeral 让 Claude 复用
+    SystemMessage 的 KV cache，省一半 token。
+    切到 DashScope (Qwen via OpenAI 兼容 API) 后这个机制没了，函数退化为普通
+    SystemMessage 构造。保留旧函数名仅为减少调用点改动。
     """
-    if not settings.bedrock_prompt_cache_enabled:
-        return SystemMessage(content=text)
-
-    content: List[Any] = [{
-        "type": "text",
-        "text": text,
-        "cache_control": {"type": "ephemeral"},
-    }]
-    return SystemMessage(content=content)
+    return SystemMessage(content=text)

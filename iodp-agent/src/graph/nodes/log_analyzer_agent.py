@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage
 
 from ..state import AgentState, ErrorLogEntry, LogAnalyzerOutput, get_user_id, get_incident_time_hint
 from src.config import settings
+from src.log_utils import log_event
 from src.tools.athena_tool import execute_athena_query
 from src.tools.dynamodb_tool import query_dq_reports
 
@@ -77,16 +78,17 @@ def log_analyzer_agent_node(state: AgentState) -> dict:
     永远 evidence_trace_ids=[]。改为 hardcode SQL 直接查 silver.parsed_logs（seed
     数据真正所在的表），稳定可靠。
     """
-    import logging
-    log = logging.getLogger(__name__)
-
     user_id   = get_user_id(state)
     time_hint = get_incident_time_hint(state) or "最近1小时"
     env       = state.get("environment", "prod")
 
     time_start, time_end = _parse_time_hint(time_hint)
-    log.info("log_analyzer query: user_id=%s time=[%s ~ %s] env=%s",
-             user_id, time_start, time_end, env)
+    log_event(
+        "node", "enter", node="log_analyzer",
+        user_id=user_id, time_hint=time_hint,
+        time_start=time_start, time_end=time_end, env=env,
+        thread_id=state.get("thread_id"), job_id=state.get("job_id"),
+    )
 
     # 走架构契约里的 v_error_log_enriched view（Gold api_error_stats JOIN Silver parsed_logs）。
     # 之前让 LLM 生成 SQL 不稳定，改为 hardcode 直接 SELECT。view 定义在
@@ -133,20 +135,35 @@ def log_analyzer_agent_node(state: AgentState) -> dict:
             workgroup=settings.athena_workgroup,
             max_rows=settings.athena_max_rows,
         )
-        log.info("Athena returned %d rows", len(query_result.get("rows", [])))
     except Exception as e:
-        log.error("Athena query FAILED: %s | SQL: %s", e, generated_sql)
+        log_event(
+            "node", "athena_failed", node="log_analyzer",
+            error=str(e),
+        )
         query_result = {"rows": [], "rows_truncated": False, "error": str(e)}
 
     rows           = query_result.get("rows", [])
     rows_truncated = query_result.get("rows_truncated", False)
 
     # ─── 查询该时段 DQ 报告 ───
+    log_event(
+        "dynamodb", "start", purpose="dq_report",
+        table=settings.dq_reports_table,
+        bronze_table="bronze_app_logs",
+        time_start=time_start, time_end=time_end,
+    )
     dq_anomaly = query_dq_reports(
         table_name="bronze_app_logs",
         time_start=time_start,
         time_end=time_end,
         dynamodb_table=settings.dq_reports_table,
+    )
+    log_event(
+        "dynamodb", "success", purpose="dq_report",
+        table=settings.dq_reports_table,
+        hit=dq_anomaly is not None,
+        error_type=dq_anomaly.get("error_type") if dq_anomaly else None,
+        failure_rate=dq_anomaly.get("failure_rate") if dq_anomaly else None,
     )
 
     # ─── 格式化 ErrorLogEntry 列表 ───
@@ -170,6 +187,13 @@ def log_analyzer_agent_node(state: AgentState) -> dict:
 
     truncation_note = f"（结果已截断至 {settings.athena_max_rows} 行）" if rows_truncated else ""
     dq_note = f" ⚠️ 该时段存在数据质量异常: {dq_anomaly['error_type']}" if dq_anomaly else ""
+
+    log_event(
+        "node", "exit", node="log_analyzer",
+        error_logs=len(error_logs),
+        rows_truncated=rows_truncated,
+        dq_anomaly=dq_anomaly.get("error_type") if dq_anomaly else None,
+    )
 
     return {
         "log_analyzer": LogAnalyzerOutput(

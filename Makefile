@@ -1,7 +1,8 @@
 .PHONY: init deploy destroy help check-aws check-tools \
        init-bigdata init-agent deploy-bigdata deploy-agent \
        destroy-agent destroy-bigdata \
-       test-api status status-bigdata status-agent clean help
+       test-api status status-bigdata status-agent clean help \
+       seed-production seed-mock
 
 # ──────────────────────────────────────────────────────────────
 # 环境变量
@@ -35,7 +36,7 @@ check-aws: check-tools
 		echo "请先设置:"; \
 		echo "  export AWS_ACCESS_KEY_ID=\"AKIAXXXXXXXXXXXXXXXX\""; \
 		echo "  export AWS_SECRET_ACCESS_KEY=\"xxxxxxxx\""; \
-		echo "  export AWS_DEFAULT_REGION=\"$(AWS_REGION)\""; \
+		echo "  export AWS_REGION=\"$(AWS_REGION)\""; \
 		exit 1; \
 	fi
 	@echo "✅ AWS 凭证验证通过 (账号: $(AWS_ACCOUNT_ID), 区域: $(AWS_REGION), 环境: $(ENV))"
@@ -177,6 +178,49 @@ test-api:
 		AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID) \
 		AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
 
+# ══════════════════════════════════════════════════════════════
+#  Seed 数据：两种模式
+#
+#  seed-production (真 demo)
+#      bigdata: Firehose → Bronze → Glue Silver → Glue Gold（真实跑一遍 ~6min）
+#      agent  : 只补 mock incident_summary + DQ reports（Glue 跑不出来的部分）
+#      成本   : ~$0.20 / 次
+#
+#  seed-mock (快速 CI / 本地)
+#      跳过整条 Glue 流水线，全部 mock 直写 Iceberg
+#      成本   : 0
+# ══════════════════════════════════════════════════════════════
+
+seed-production: check-aws
+	@echo ""
+	@echo "╔══════════════════════════════════════════════════════════╗"
+	@echo "║  Production-like Seed: 真实 Medallion 流水线 + RAG mock    ║"
+	@echo "╚══════════════════════════════════════════════════════════╝"
+	@echo ""
+	@echo "━━━ Step 1: BigData 真实流水线（Firehose → Glue Silver → Glue Gold）━━━"
+	$(MAKE) -C $(BIGDATA_DIR) seed-production \
+		AWS_REGION=$(AWS_REGION) ENV=$(ENV) \
+		AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID) \
+		AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+	@echo ""
+	@echo "━━━ Step 2: Agent 端 mock RAG-only（incident_summary + DQ reports）━━━"
+	$(MAKE) -C $(AGENT_DIR) seed-data-rag-only \
+		AWS_REGION=$(AWS_REGION) ENV=$(ENV) \
+		AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID) \
+		AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+	@echo ""
+	@echo "✅ Production-like seed 完成，Agent 端可发 test-api 验证"
+
+seed-mock: check-aws
+	@echo ""
+	@echo "╔══════════════════════════════════════════════════════════╗"
+	@echo "║  Mock Seed: 跳过 Glue 流水线，直写 Iceberg（快速）         ║"
+	@echo "╚══════════════════════════════════════════════════════════╝"
+	$(MAKE) -C $(AGENT_DIR) seed-data \
+		AWS_REGION=$(AWS_REGION) ENV=$(ENV) \
+		AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID) \
+		AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
+
 status: status-bigdata status-agent
 
 status-bigdata:
@@ -221,6 +265,8 @@ help:
 	@echo "  make init              一键部署整个平台（BigData → Agent）"
 	@echo "  make deploy            更新整个平台"
 	@echo "  make destroy           销毁整个平台（Agent → BigData）"
+	@echo "  make seed-production   真实跑一遍 Firehose→Glue 流水线 + mock RAG (~6min, ~\$$0.20)"
+	@echo "  make seed-mock         跳过 Glue 流水线全部 mock 直写 Iceberg（快速，零成本）"
 	@echo "  make test-api          端到端测试"
 	@echo "  make status            查看全局部署状态"
 	@echo "  make clean             清理本地资源"

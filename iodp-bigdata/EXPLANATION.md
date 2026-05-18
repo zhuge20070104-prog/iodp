@@ -138,7 +138,7 @@ aws glue start-job-run \
 - **S3 Event Notification**：当 `gold_bucket` 下 `incident_summary/` 路径有新 `.parquet` 文件写入时，触发 Lambda。
 - **Lambda 函数** `iodp-vector-indexer-{env}`：Python 3.12，1024MB 内存，5 分钟超时。
 - **SQS Dead Letter Queue**：Lambda 处理失败的事件会进入 SQS DLQ，消息保留 14 天。
-- **IAM Role**：允许读 Gold bucket、调用 Bedrock Embedding API（`amazon.titan-embed-text-v2:0`）、`s3vectors:PutVectors` 等写入权限、发 SQS、写 CloudWatch Logs。
+- **IAM Role**：允许读 Gold bucket、`s3vectors:PutVectors` 等写入权限、发 SQS、写 CloudWatch Logs。Embedding 走 DashScope 公网 API（不经 AWS IAM，靠 `IODP_LLM_API_KEY` 环境变量授权）。
 - **CloudWatch Alarm**：Lambda 连续 2 个 5 分钟窗口内错误超 3 次 → 发 SNS 告警。
 
 注意：vector bucket 与 index 物理资源由 `iodp-agent` 项目的 Terraform 创建，本模块通过 tfvars (`vector_bucket_name` / `vector_bucket_arn`) 引用。
@@ -148,16 +148,16 @@ aws glue start-job-run \
 ```
 gold_incident_summary.py 写 parquet 到 Gold bucket
     ↓ S3 Event Notification（自动触发）
-Lambda: 读 parquet → Bedrock 生成 embedding → put_vectors 到 S3 Vectors index "incident_solutions"
+Lambda: 读 parquet → DashScope text-embedding-v3 生成 embedding → put_vectors 到 S3 Vectors index "incident_solutions"
     ↓
 Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
 ```
 
 #### 关键设计
 
-- `reserved_concurrent_executions = 2`：控制 Bedrock embedding 调用的并发与费率。
+- `reserved_concurrent_executions = 2`：控制 DashScope embedding 调用的并发与费率。
 - `BATCH_SIZE = 50`：每次最多索引 50 条向量（S3 Vectors `put_vectors` 单次上限 500）。
-- 使用 Bedrock Titan Embedding（1024 维, normalize=True）配合 cosine distance 做向量化，支持语义搜索。
+- 使用 DashScope `text-embedding-v3`（1024 维, normalize=True）配合 cosine distance 做向量化，与 iodp-agent 查询侧同一模型，保证向量空间一致。
 
 ---
 
@@ -265,7 +265,7 @@ Agent RAG Agent 通过 query_vectors 做语义搜索，找历史相似事件
               Gold incident_summary
                    │
                    │ terraform/modules/vector_indexer/
-                   │ (S3 Event → Lambda → Bedrock Embedding → S3 Vectors)
+                   │ (S3 Event → Lambda → DashScope Embedding → S3 Vectors)
                    ▼
               Agent 语义搜索历史相似事件
 

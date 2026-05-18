@@ -33,6 +33,12 @@ variable "sns_alert_topic_arn" {
   type        = string
 }
 
+variable "llm_api_key" {
+  description = "DashScope API key (Qwen embedding via OpenAI-compatible endpoint). Lambda 用它生成 1024 维向量；与 iodp-agent Lambda 共用同一 key。"
+  type        = string
+  sensitive   = true
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

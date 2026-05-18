@@ -3,3 +3,5 @@
 boto3>=1.40.0
 pandas>=2.0.0
 pyarrow>=14.0.0
+# DashScope OpenAI 兼容 embedding API（取代 Bedrock Titan）
+openai>=1.40.0

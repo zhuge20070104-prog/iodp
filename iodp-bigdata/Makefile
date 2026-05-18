@@ -1,4 +1,4 @@
-.PHONY: init deploy deploy-infra deploy-ddl enable-triggers disable-triggers destroy do-destroy help check-aws check-tools status clean output export-outputs demo-pipeline demo-silver demo-gold produce-sample produce-clicks produce-logs bootstrap-backend
+.PHONY: init deploy deploy-infra deploy-ddl upload-scripts enable-triggers disable-triggers destroy do-destroy help check-aws check-tools status clean output export-outputs demo-pipeline demo-silver demo-gold produce-sample produce-clicks produce-logs bootstrap-backend seed-production
 
 # ──────────────────────────────────────────────────────────────
 # 环境变量
@@ -14,12 +14,17 @@ TF_STATE_BUCKET ?= iodp-terraform-state-prod
 TF_STATE_REGION ?= us-east-1
 TF_LOCK_TABLE   ?= iodp-terraform-locks
 
+# LLM API key（DashScope/Qwen），从 shell env 读取避免硬编码
+# 给 vector_indexer Lambda 用，调 DashScope text-embedding-v3 生成 1024 维向量
+LLM_API_KEY ?= $(IODP_LLM_API_KEY)
+
 # Terraform 公共变量
 #   - 自动加载 environments/$(ENV).tfvars（所有业务变量集中放那里）
-#   - -var 用于覆盖 region / environment，方便 Makefile 切换
+#   - -var 用于覆盖 region / environment / llm_api_key，方便 Makefile 切换
 TF_VARS := -var-file=environments/$(ENV).tfvars \
            -var='aws_region=$(AWS_REGION)' \
-           -var='environment=$(ENV)'
+           -var='environment=$(ENV)' \
+           -var='llm_api_key=$(LLM_API_KEY)'
 
 # ──────────────────────────────────────────────────────────────
 # 检查必要工具
@@ -40,7 +45,7 @@ check-aws: check-tools
 		echo "请先设置:"; \
 		echo "  export AWS_ACCESS_KEY_ID=\"AKIAXXXXXXXXXXXXXXXX\""; \
 		echo "  export AWS_SECRET_ACCESS_KEY=\"xxxxxxxx\""; \
-		echo "  export AWS_DEFAULT_REGION=\"$(AWS_REGION)\""; \
+		echo "  export AWS_REGION=\"$(AWS_REGION)\""; \
 		exit 1; \
 	fi
 	@echo "✅ AWS 凭证验证通过 (账号: $(AWS_ACCOUNT_ID), 区域: $(AWS_REGION), 环境: $(ENV))"
@@ -54,7 +59,7 @@ check-aws: check-tools
 #   Glue Database 只能由 Terraform 建；Iceberg Table 只能由 Athena DDL 建。
 #   所以必须 infra 先于 DDL。
 # ──────────────────────────────────────────────────────────────
-init: deploy-infra deploy-ddl
+init: deploy-infra upload-scripts deploy-ddl
 	@echo ""
 	@echo "=========================================="
 	@echo " ✅ IODP BigData 首次部署完成（$(ENV)）"
@@ -113,6 +118,20 @@ deploy-infra: bootstrap-backend
 	cd $(TF_DIR) && terraform apply $(TF_VARS) -var='triggers_enabled=false' -auto-approve
 	@echo "✅ 基础设施就绪：Glue Database / Job 已创建，Triggers 未启用"
 
+# 阶段 1.5：上传 Glue PySpark 脚本和 lib.zip 到 scripts bucket
+#   - 必须在 deploy-infra 之后（scripts_bucket 由 storage 模块创建）
+#   - 必须在 demo-silver/demo-gold/seed-production 之前（Glue Job script_location 指向这些 key）
+#   - 漏跑会导致 Glue Job 永远启动失败：NoSuchKey: batch/silver_enrich_clicks.py
+upload-scripts: check-aws
+	@echo ""
+	@echo "📦 [1.5/2] 上传 Glue 脚本到 scripts bucket..."
+	@SCRIPTS_BUCKET=$$(cd $(TF_DIR) && terraform output -raw scripts_bucket_name 2>/dev/null); \
+	if [ -z "$$SCRIPTS_BUCKET" ]; then \
+		echo "❌ 无法从 Terraform 输出读 scripts_bucket_name，先跑 deploy-infra"; exit 1; \
+	fi; \
+	bash scripts/upload_glue_scripts.sh "$$SCRIPTS_BUCKET"
+	@echo "✅ Glue 脚本已上传"
+
 # 阶段 2：执行 Athena DDL（在上面建好的 Database 里建 Iceberg Table）
 deploy-ddl: check-aws
 	@if [ -z "$(AWS_ACCOUNT_ID)" ]; then echo "❌ 无法获取 AWS_ACCOUNT_ID"; exit 1; fi
@@ -145,6 +164,10 @@ deploy: check-aws
 	@# 幂等 init -reconfigure：处理 backend 配置历史变更，state 在远端 S3 不会丢
 	cd $(TF_DIR) && terraform init -reconfigure
 	cd $(TF_DIR) && terraform apply $(TF_VARS) -auto-approve
+	@$(MAKE) upload-scripts \
+		AWS_REGION=$(AWS_REGION) ENV=$(ENV) \
+		AWS_ACCESS_KEY_ID=$(AWS_ACCESS_KEY_ID) \
+		AWS_SECRET_ACCESS_KEY=$(AWS_SECRET_ACCESS_KEY)
 	@echo "✅ 更新完成"
 	@cd $(TF_DIR) && terraform output
 
@@ -199,6 +222,18 @@ produce-logs: check-aws
 	python scripts/produce_sample_events.py \
 		--stream app_logs --env $(ENV) --region $(AWS_REGION) \
 		--count $(COUNT) --error-rate $(ERROR_RATE)
+
+# ──────────────────────────────────────────────────────────────
+# Production-like seed：真实跑一遍 Firehose → Bronze → Silver → Gold 流水线
+#   - 不走 awswrangler 直写 Iceberg
+#   - 用 --TARGET_HOUR=<当前小时> 触发 Glue Job，跳过等待下一小时 cron
+#   - 不含 incident_summary（需 24h 数据，由 agent 端 rag-only mock 补齐）
+#   - 耗时 ~6 分钟，成本 ~$0.20
+# ──────────────────────────────────────────────────────────────
+seed-production: check-aws
+	@echo ""
+	@echo "▶ [BigData] Production-like seed: Firehose → Glue Silver → Glue Gold"
+	bash scripts/seed_production_pipeline.sh $(ENV) $(AWS_REGION)
 
 # ──────────────────────────────────────────────────────────────
 # 查看部署状态
@@ -270,19 +305,21 @@ output:
 help:
 	@echo "IODP BigData 数据层 Makefile"
 	@echo ""
-	@echo "首次部署（两步 bootstrap，Triggers 默认手动模式）："
-	@echo "  make init              一键 bootstrap = deploy-infra + deploy-ddl"
+	@echo "首次部署（三步 bootstrap，Triggers 默认手动模式）："
+	@echo "  make init              一键 bootstrap = deploy-infra + upload-scripts + deploy-ddl"
 	@echo "  make bootstrap-backend 幂等创建远端 state S3 桶 + DynamoDB 锁表（首次/排错用）"
-	@echo "  make deploy-infra      [1/2] terraform apply（Triggers 关闭，自动调 bootstrap-backend）"
-	@echo "  make deploy-ddl        [2/2] Athena 建 7 张 Iceberg 表"
+	@echo "  make deploy-infra      [1/3] terraform apply（Triggers 关闭，自动调 bootstrap-backend）"
+	@echo "  make upload-scripts    [2/3] 把 glue_jobs/batch/*.py 和 lib.zip 传到 scripts bucket"
+	@echo "  make deploy-ddl        [3/3] Athena 建 7 张 Iceberg 表"
 	@echo ""
 	@echo "演示 / 手动跑流水线（推荐 — FinOps 最省）："
 	@echo "  make produce-sample    向 Firehose 推送示例点击流 + app_logs 事件"
 	@echo "  make produce-clicks    仅推 clickstream（COUNT=1000）"
 	@echo "  make produce-logs      仅推 app_logs（ERROR_RATE=0.02）"
-	@echo "  make demo-pipeline     手动触发 Silver → 等 5 min → 触发 Gold"
-	@echo "  make demo-silver       仅触发 Silver 层 2 个 Job"
-	@echo "  make demo-gold         仅触发 Gold 层 3 个 Job"
+	@echo "  make seed-production   真实跑 Firehose→Bronze→Silver→Gold (--TARGET_HOUR=当前小时, ~6min)"
+	@echo "  make demo-pipeline     传统手动模式：触发 Silver → 等 5 min → 触发 Gold（处理上一小时）"
+	@echo "  make demo-silver       仅触发 Silver 层 2 个 Job（处理上一小时分区）"
+	@echo "  make demo-gold         仅触发 Gold 层 3 个 Job（处理上一小时分区）"
 	@echo ""
 	@echo "Trigger 模式切换："
 	@echo "  make enable-triggers   切到自动 cron 模式（~\$$35/周）"
